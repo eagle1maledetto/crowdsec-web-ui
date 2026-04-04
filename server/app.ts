@@ -24,7 +24,7 @@ import type {
   UpdateCheckResponse,
 } from '../shared/contracts';
 import { createRuntimeConfig, getIntervalName, parseRefreshInterval, type RuntimeConfig } from './config';
-import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams } from './database';
+import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams, type StatsAlertRow, type StatsDecisionRow } from './database';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
@@ -252,11 +252,35 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         await ensureBootstrapReady('alerts request');
       }
 
+      const since = new Date(Date.now() - config.lookbackMs).toISOString();
+      const pageParam = context.req.query('page');
+
+      if (pageParam) {
+        const page = Math.max(1, Number(pageParam) || 1);
+        const pageSize = Math.min(500, Math.max(10, Number(context.req.query('page_size')) || 100));
+        const offset = (page - 1) * pageSize;
+        const total = database.countAlertsSince(since);
+        const rows = database.getAlertsSincePaginated(since, pageSize, offset);
+        const alerts = hydrateAlertsBatch(rows)
+          .map((alert) => applySimulationModeToAlert(alert, config.simulationsEnabled))
+          .filter((alert): alert is AlertRecord => alert !== null)
+          .map((alert) => toSlimAlert(alert));
+
+        return context.json({
+          data: alerts,
+          pagination: {
+            page,
+            page_size: pageSize,
+            total,
+            total_pages: Math.ceil(total / pageSize),
+          },
+        });
+      }
+
       if (isResponseCacheValid(responseCache.alerts)) {
         return context.json(responseCache.alerts.data);
       }
 
-      const since = new Date(Date.now() - config.lookbackMs).toISOString();
       const rows = database.getAlertsSince(since);
       const alerts = hydrateAlertsBatch(rows)
         .map((alert) => applySimulationModeToAlert(alert, config.simulationsEnabled))
@@ -354,6 +378,32 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       const includeExpired = context.req.query('include_expired') === 'true';
       const now = new Date().toISOString();
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
+      const pageParam = context.req.query('page');
+
+      if (pageParam && !includeExpired) {
+        const page = Math.max(1, Number(pageParam) || 1);
+        const pageSize = Math.min(500, Math.max(10, Number(context.req.query('page_size')) || 100));
+        const offset = (page - 1) * pageSize;
+        const total = database.countActiveDecisions(now);
+        const rows = database.getActiveDecisionsPaginated(now, pageSize, offset);
+
+        let decisions = rows.map((row) => toDecisionListItem(JSON.parse(row.raw_data) as AlertDecision & Record<string, unknown>, false));
+        if (!config.simulationsEnabled) {
+          decisions = decisions.filter((decision) => !decision.simulated);
+        }
+        decisions = markDuplicateDecisions(decisions);
+
+        return context.json({
+          data: decisions,
+          pagination: {
+            page,
+            page_size: pageSize,
+            total,
+            total_pages: Math.ceil(total / pageSize),
+          },
+        });
+      }
+
       const rows = includeExpired
         ? database.getDecisionsSince(since, now)
         : database.getActiveDecisions(now);
@@ -560,34 +610,25 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       }
 
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
-      const rows = database.getAlertsSince(since);
-      const alerts = hydrateAlertsBatch(rows)
-        .map((alert) => {
-          const filtered = applySimulationModeToAlert(alert, config.simulationsEnabled);
-          if (!filtered) {
-            return null;
-          }
-          const payload: StatsAlert = {
-            created_at: filtered.created_at,
-            kind: typeof filtered.kind === 'string' ? filtered.kind : undefined,
-            scenario: resolveAlertScenario(filtered),
-            source: filtered.source
-              ? {
-                  ip: filtered.source.ip,
-                  value: filtered.source.value,
-                  range: filtered.source.range,
-                  cn: filtered.source.cn,
-                  as_name: filtered.source.as_name,
-                  scope: filtered.source.scope,
-                }
-              : null,
-            target: filtered.target,
-            simulated: isAlertSimulated(filtered),
-          };
-          return payload;
-        })
-        .filter((alert): alert is StatsAlert => alert !== null)
-        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+      const statsRows = database.getAlertStatsSince(since);
+      const alerts: StatsAlert[] = statsRows
+        .filter((row) => config.simulationsEnabled || !row.simulated)
+        .map((row) => ({
+          created_at: row.created_at,
+          scenario: row.scenario || undefined,
+          source: row.source_ip
+            ? {
+                ip: row.source_ip,
+                value: row.source_ip,
+                range: row.source_range || undefined,
+                cn: row.source_cn || undefined,
+                as_name: row.source_as_name || undefined,
+                scope: row.source_scope || undefined,
+              }
+            : null,
+          target: row.target || undefined,
+          simulated: row.simulated === 1,
+        }));
 
       responseCache.statsAlerts = { data: alerts, generatedAt: Date.now() };
       return context.json(alerts);
@@ -613,22 +654,18 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
       const now = new Date().toISOString();
-      const decisions = database
-        .getDecisionsSince(since, now)
-        .map((row) => {
-          const decision = JSON.parse(row.raw_data) as Record<string, unknown>;
-          const payload: StatsDecision = {
-            id: decision.id as string | number,
-            created_at: String(decision.created_at || ''),
-            scenario: typeof decision.scenario === 'string' ? decision.scenario : undefined,
-            value: typeof decision.value === 'string' ? decision.value : undefined,
-            stop_at: typeof decision.stop_at === 'string' ? decision.stop_at : undefined,
-            target: typeof decision.target === 'string' ? decision.target : undefined,
-            simulated: normalizeDecisionSimulated(decision),
-          };
-          return payload;
-        })
-        .filter((decision) => config.simulationsEnabled || !decision.simulated)
+      const statsRows = database.getDecisionStatsSince(since, now);
+      const decisions: StatsDecision[] = statsRows
+        .filter((row) => config.simulationsEnabled || !row.simulated)
+        .map((row) => ({
+          id: row.id,
+          created_at: row.created_at,
+          scenario: row.scenario || undefined,
+          value: row.value || undefined,
+          stop_at: row.stop_at || undefined,
+          target: row.target || undefined,
+          simulated: row.simulated === 1,
+        }))
         .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
       responseCache.statsDecisions = { data: decisions, generatedAt: Date.now() };
@@ -871,6 +908,12 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       $created_at: alert.created_at,
       $scenario: alert.scenario,
       $source_ip: sourceValue,
+      $source_cn: alertSource?.cn,
+      $source_as_name: alertSource?.as_name,
+      $source_scope: alertSource?.scope,
+      $source_range: alertSource?.range,
+      $target: target,
+      $simulated: enrichedAlert.simulated ? 1 : 0,
       $message: alert.message || '',
       $raw_data: JSON.stringify(enrichedAlert),
     };
@@ -915,6 +958,8 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         $type: decision.type,
         $origin: enrichedDecision.origin,
         $scenario: enrichedDecision.scenario,
+        $target: target,
+        $simulated: decision.simulated === true ? 1 : 0,
         $raw_data: JSON.stringify(enrichedDecision),
       };
 

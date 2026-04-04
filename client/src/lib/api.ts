@@ -11,6 +11,7 @@ import type {
   NotificationListResponse,
   NotificationRule,
   NotificationSettingsResponse,
+  PaginatedResponse,
   SlimAlert,
   StatsAlert,
   StatsDecision,
@@ -29,6 +30,10 @@ async function fetchJson<T>(input: string, init?: RequestInit, defaultMsg?: stri
 
 export async function fetchAlerts(): Promise<SlimAlert[]> {
     return fetchJson<SlimAlert[]>('/api/alerts', undefined, 'Failed to fetch alerts');
+}
+
+export async function fetchAlertsPaginated(page: number, pageSize = 100): Promise<PaginatedResponse<SlimAlert>> {
+    return fetchJson<PaginatedResponse<SlimAlert>>(`/api/alerts?page=${page}&page_size=${pageSize}`, undefined, 'Failed to fetch alerts');
 }
 
 export async function fetchAlert(id: string | number): Promise<AlertRecord> {
