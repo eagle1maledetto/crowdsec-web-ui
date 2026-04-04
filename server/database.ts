@@ -234,13 +234,13 @@ export class CrowdsecDatabase {
       SELECT id, created_at, scenario, value, stop_at, target, simulated
       FROM decisions
       WHERE created_at >= $since OR stop_at > $now
-      ORDER BY stop_at DESC
+      ORDER BY created_at DESC
     `);
 
     this.getActiveDecisionsPaginatedStatement = this.db.query(`
       SELECT raw_data, created_at FROM decisions
       WHERE stop_at > $now
-      ORDER BY stop_at DESC
+      ORDER BY created_at DESC
       LIMIT $limit OFFSET $offset
     `);
 
@@ -257,13 +257,13 @@ export class CrowdsecDatabase {
     this.getActiveDecisionsStatement = this.db.query(`
       SELECT raw_data, created_at FROM decisions
       WHERE stop_at > $now
-      ORDER BY stop_at DESC
+      ORDER BY created_at DESC
     `);
 
     this.getDecisionsSinceStatement = this.db.query(`
       SELECT raw_data, created_at FROM decisions
       WHERE created_at >= $since OR stop_at > $now
-      ORDER BY stop_at DESC
+      ORDER BY created_at DESC
     `);
 
     this.deleteOldDecisionsStatement = this.db.query('DELETE FROM decisions WHERE stop_at < $cutoff');
@@ -272,7 +272,7 @@ export class CrowdsecDatabase {
     this.getActiveDecisionByValueStatement = this.db.query(`
       SELECT raw_data, stop_at FROM decisions
       WHERE value = $value AND stop_at > $now AND id NOT LIKE 'dup_%'
-      ORDER BY stop_at DESC
+      ORDER BY created_at DESC
       LIMIT 1
     `);
     this.deleteAlertStatement = this.db.query('DELETE FROM alerts WHERE id = $id');
@@ -473,7 +473,7 @@ export class CrowdsecDatabase {
 
   searchDecisionsPaginated(now: string, filters: DecisionSearchFilters, limit: number, offset: number): RowWithRawData[] {
     const { sql, params } = this.buildDecisionSearchQuery(now, filters, false);
-    const stmt = this.db.prepare(`${sql} ORDER BY stop_at DESC LIMIT ? OFFSET ?`);
+    const stmt = this.db.prepare(`${sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`);
     return stmt.all(...params, limit, offset) as RowWithRawData[];
   }
 

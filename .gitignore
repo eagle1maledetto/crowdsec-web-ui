@@ -15,3 +15,5 @@ coverage
 frontend/coverage
 client/coverage
 /dist
+docker-compose.override.yml
+.env
