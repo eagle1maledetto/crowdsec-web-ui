@@ -25,7 +25,7 @@ import type {
 } from '../shared/contracts';
 import { normalizeMachineId, resolveMachineName } from '../shared/machine';
 import { createRuntimeConfig, getIntervalName, parseRefreshInterval, type RuntimeConfig } from './config';
-import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams, type StatsAlertRow, type StatsDecisionRow } from './database';
+import { CrowdsecDatabase, type AlertInsertParams, type AlertSearchFilters, type DecisionInsertParams, type StatsAlertRow, type StatsDecisionRow } from './database';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
@@ -261,8 +261,38 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         const page = Math.max(1, Number(pageParam) || 1);
         const pageSize = Math.min(500, Math.max(10, Number(context.req.query('page_size')) || 100));
         const offset = (page - 1) * pageSize;
-        const total = database.countAlertsSince(since);
-        const rows = database.getAlertsSincePaginated(since, pageSize, offset);
+
+        const filters: AlertSearchFilters = {};
+        const q = context.req.query('q');
+        const ip = context.req.query('ip');
+        const scenario = context.req.query('scenario');
+        const country = context.req.query('country');
+        const asName = context.req.query('as');
+        const target = context.req.query('target');
+        const dateStart = context.req.query('dateStart');
+        const dateEnd = context.req.query('dateEnd');
+        const simulation = context.req.query('simulation');
+
+        if (q) filters.q = q;
+        if (ip) filters.ip = ip;
+        if (scenario) filters.scenario = scenario;
+        if (country) filters.country = country;
+        if (asName) filters.as_name = asName;
+        if (target) filters.target = target;
+        if (dateStart) filters.dateStart = dateStart;
+        if (dateEnd) filters.dateEnd = dateEnd;
+        if (simulation === 'simulated') filters.simulated = true;
+        if (simulation === 'live') filters.simulated = false;
+        if (!config.simulationsEnabled) filters.simulated = false;
+
+        const hasFilters = Object.keys(filters).length > 0;
+
+        const total = hasFilters
+          ? database.countSearchAlerts(since, filters)
+          : database.countAlertsSince(since);
+        const rows = hasFilters
+          ? database.searchAlertsPaginated(since, filters, pageSize, offset)
+          : database.getAlertsSincePaginated(since, pageSize, offset);
         const alerts = hydrateAlertsBatch(rows)
           .map((alert) => applySimulationModeToAlert(alert, config.simulationsEnabled))
           .filter((alert): alert is AlertRecord => alert !== null)

@@ -32,8 +32,14 @@ export async function fetchAlerts(): Promise<SlimAlert[]> {
     return fetchJson<SlimAlert[]>('/api/alerts', undefined, 'Failed to fetch alerts');
 }
 
-export async function fetchAlertsPaginated(page: number, pageSize = 100): Promise<PaginatedResponse<SlimAlert>> {
-    return fetchJson<PaginatedResponse<SlimAlert>>(`/api/alerts?page=${page}&page_size=${pageSize}`, undefined, 'Failed to fetch alerts');
+export async function fetchAlertsPaginated(page: number, pageSize = 100, filters?: Record<string, string>): Promise<PaginatedResponse<SlimAlert>> {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters) {
+        for (const [key, value] of Object.entries(filters)) {
+            if (value) params.set(key, value);
+        }
+    }
+    return fetchJson<PaginatedResponse<SlimAlert>>(`/api/alerts?${params.toString()}`, undefined, 'Failed to fetch alerts');
 }
 
 export async function fetchAlert(id: string | number): Promise<AlertRecord> {

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, type MouseEvent as ReactMouseEvent } from "react";
 import { useSearchParams, Link } from "react-router-dom";
-import { fetchAlerts, fetchAlert, deleteAlert, bulkDeleteAlerts, cleanupByIp, fetchConfig } from "../lib/api";
+import { fetchAlerts, fetchAlertsPaginated, fetchAlert, deleteAlert, bulkDeleteAlerts, cleanupByIp, fetchConfig } from "../lib/api";
 import { isSimulatedAlert, isSimulatedDecision, matchesSimulationFilter, parseSimulationFilter } from "../lib/simulation";
 import { useRefresh } from "../contexts/useRefresh";
 import { Badge } from "../components/ui/Badge";
@@ -9,7 +9,6 @@ import { ScenarioName } from "../components/ScenarioName";
 import { TimeDisplay } from "../components/TimeDisplay";
 import { EventCard } from "../components/EventCard";
 import { getCountryName } from "../lib/utils";
-import { resolveMachineName } from "../../../shared/machine";
 import { Search, Info, ExternalLink, Shield, ShieldBan, Trash2, X, AlertCircle } from "lucide-react";
 import type { AlertRecord, AlertSource, ApiPermissionError, BulkDeleteResult, SimulationFilter, SlimAlert } from '../types';
 
@@ -97,12 +96,14 @@ export function Alerts() {
     const { refreshSignal, setLastUpdated } = useRefresh();
     const [alerts, setAlerts] = useState<AlertListItem[]>([]);
     const [simulationsEnabled, setSimulationsEnabled] = useState(false);
-    const [machineFeaturesEnabled, setMachineFeaturesEnabled] = useState(false);
     const [filter, setFilter] = useState("");
     const [loading, setLoading] = useState(true);
     const [selectedAlert, setSelectedAlert] = useState<AlertSelection | null>(null);
-    const [displayedCount, setDisplayedCount] = useState(50);
     const [displayedDecisionCount, setDisplayedDecisionCount] = useState(50);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const [totalAlerts, setTotalAlerts] = useState(0);
+    const PAGE_SIZE = 100;
     const [searchParams, setSearchParams] = useSearchParams();
     const [pendingDeleteAction, setPendingDeleteAction] = useState<AlertDeleteAction | null>(null);
     const [selectedAlertIds, setSelectedAlertIds] = useState<string[]>([]);
@@ -116,32 +117,52 @@ export function Alerts() {
     // Ref to track selected alert ID for auto-refresh (avoids stale closure issues)
     const selectedAlertIdRef = useRef<string | number | null>(null);
 
-    // Intersection Observer for infinite scroll
-    const observer = useRef<IntersectionObserver | null>(null);
-    const lastAlertElementRef = useCallback((node: HTMLTableRowElement | null) => {
-        if (loading) return;
-        if (observer.current) observer.current.disconnect();
-        observer.current = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting) {
-                setDisplayedCount((prev) => prev + 50);
-            }
-        });
-        if (node) observer.current.observe(node);
-    }, [loading]);
+    const filterDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const filterRef = useRef(filter);
+    const currentPageRef = useRef(currentPage);
+    filterRef.current = filter;
+    currentPageRef.current = currentPage;
 
     const decisionContainerRef = useRef<HTMLDivElement | null>(null);
     const selectAllAlertsRef = useRef<HTMLInputElement | null>(null);
 
-    const loadAlerts = useCallback(async (isBackground = false) => {
+    const buildServerFilters = useCallback((): Record<string, string> => {
+        const serverFilters: Record<string, string> = {};
+        if (filterRef.current) serverFilters.q = filterRef.current;
+        const paramIp = searchParams.get("ip");
+        const paramCountry = searchParams.get("country");
+        const paramScenario = searchParams.get("scenario");
+        const paramAs = searchParams.get("as");
+        const paramTarget = searchParams.get("target");
+        const paramDateStart = searchParams.get("dateStart");
+        const paramDateEnd = searchParams.get("dateEnd");
+        if (paramIp) serverFilters.ip = paramIp;
+        if (paramCountry) serverFilters.country = paramCountry;
+        if (paramScenario) serverFilters.scenario = paramScenario;
+        if (paramAs) serverFilters.as = paramAs;
+        if (paramTarget) serverFilters.target = paramTarget;
+        if (paramDateStart) serverFilters.dateStart = paramDateStart;
+        if (paramDateEnd) serverFilters.dateEnd = paramDateEnd;
+        if (currentSimulationFilter === 'simulated') serverFilters.simulation = 'simulated';
+        if (currentSimulationFilter === 'live') serverFilters.simulation = 'live';
+        return serverFilters;
+    }, [searchParams, currentSimulationFilter]);
+
+    const loadAlerts = useCallback(async (isBackground = false, page?: number) => {
         try {
             if (!isBackground) setLoading(true);
-            const [alertsData, configData] = await Promise.all([
-                fetchAlerts(),
+            const targetPage = page ?? currentPageRef.current;
+
+            const serverFilters = buildServerFilters();
+            const [paginatedResult, configData] = await Promise.all([
+                fetchAlertsPaginated(targetPage, PAGE_SIZE, Object.keys(serverFilters).length > 0 ? serverFilters : undefined),
                 fetchConfig(),
             ]);
-            setAlerts(alertsData);
+            setAlerts(paginatedResult.data);
+            setCurrentPage(paginatedResult.pagination.page);
+            setTotalPages(paginatedResult.pagination.total_pages);
+            setTotalAlerts(paginatedResult.pagination.total);
             setSimulationsEnabled(configData.simulations_enabled === true);
-            setMachineFeaturesEnabled(configData.machine_features_enabled === true);
 
             // Check if there's an alert ID in the URL
             if (alertIdParam) {
@@ -152,7 +173,7 @@ export function Alerts() {
                 } catch (err) {
                     console.error("Alert not found", err);
                     // Fallback to slim data from list if fetch fails
-                    const existingAlert = alertsData.find((alert) => String(alert.id) === alertIdParam);
+                    const existingAlert = paginatedResult.data.find((alert) => String(alert.id) === alertIdParam);
                     if (existingAlert) {
                         setSelectedAlert(existingAlert);
                     }
@@ -183,12 +204,22 @@ export function Alerts() {
         } finally {
             if (!isBackground) setLoading(false);
         }
-    }, [alertIdParam, queryParam, setLastUpdated]);
+    }, [alertIdParam, queryParam, setLastUpdated, buildServerFilters]);
 
     useEffect(() => {
-        loadAlerts(false);
+        loadAlerts(false, 1);
     }, [loadAlerts]);
 
+    // Debounced search: reload from page 1 when filter changes
+    useEffect(() => {
+        if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
+        filterDebounceRef.current = setTimeout(() => {
+            setCurrentPage(1);
+            loadAlerts(false, 1);
+        }, 300);
+        return () => { if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filter]);
 
     useEffect(() => {
         if (refreshSignal > 0) loadAlerts(true);
@@ -257,7 +288,6 @@ export function Alerts() {
 
             setPendingDeleteAction(null);
             await loadAlerts();
-            setDisplayedCount(50);
             if (resultMessage) {
                 setErrorInfo({ message: resultMessage });
             }
@@ -282,68 +312,8 @@ export function Alerts() {
         ));
     };
 
-    const filteredAlerts = alerts.filter((alert) => {
-        const search = filter.toLowerCase();
-
-        // Specific query params
-        const paramIp = (searchParams.get("ip") || "").toLowerCase();
-        const paramCountry = (searchParams.get("country") || "").toLowerCase();
-        const paramScenario = (searchParams.get("scenario") || "").toLowerCase();
-        const paramAs = (searchParams.get("as") || "").toLowerCase();
-        const paramDate = searchParams.get("date") || "";
-        const paramDateStart = searchParams.get("dateStart") || "";
-
-        const paramDateEnd = searchParams.get("dateEnd") || "";
-        const paramTarget = (searchParams.get("target") || "").toLowerCase();
-
-        if (!matchesSimulationFilter({ simulated: isSimulatedAlert(alert) }, currentSimulationFilter)) return false;
-
-        const scenario = (alert.scenario || "").toLowerCase();
-        const message = (alert.message || "").toLowerCase();
-        const sourceValue = (getAlertSourceValue(alert.source) || "").toLowerCase();
-        const cn = (alert.source?.cn || "").toLowerCase();
-        const asName = (alert.source?.as_name || "").toLowerCase();
-        const machine = machineFeaturesEnabled ? (resolveMachineName(alert) || "").toLowerCase() : "";
-
-        // Check specific filters if present
-        if (paramIp && !sourceValue.includes(paramIp)) return false;
-        if (paramCountry && !cn.includes(paramCountry)) return false;
-        if (paramScenario && !scenario.includes(paramScenario)) return false;
-        if (paramScenario && !scenario.includes(paramScenario)) return false;
-        if (paramAs && !asName.includes(paramAs)) return false;
-        if (paramTarget && !(alert.target || "").toLowerCase().includes(paramTarget)) return false;
-
-        // Single date filter (legacy support)
-        if (paramDate && !(alert.created_at && alert.created_at.startsWith(paramDate))) return false;
-
-        // Date range filter (dateStart/dateEnd)
-        if (paramDateStart || paramDateEnd) {
-            if (!alert.created_at) return false;
-
-            // Helper to extract date/time key from ISO timestamp
-            const itemKey = getDateFilterKey(alert.created_at, paramDateStart.includes('T') || paramDateEnd.includes('T'));
-
-            if (paramDateStart && itemKey < paramDateStart) return false;
-            if (paramDateEnd && itemKey > paramDateEnd) return false;
-        }
-
-        // Check generic search
-        if (search) {
-            const countryName = (getCountryName(alert.source?.cn) || "").toLowerCase();
-            return scenario.includes(search) ||
-                message.includes(search) ||
-                sourceValue.includes(search) ||
-                cn.includes(search) ||
-                countryName.includes(search) ||
-                asName.includes(search) ||
-                (machineFeaturesEnabled && machine.includes(search)) ||
-                (alert.target || "").toLowerCase().includes(search) ||
-                (alert.meta_search || "").toLowerCase().includes(search) ||
-                (isSimulatedAlert(alert) ? 'simulation simulated' : 'live').includes(search);
-        }
-
-        return true;
-    });
+    // Server-side filtering: alerts are already filtered by the paginated API
+    const filteredAlerts = alerts;
 
     const filteredAlertIds = filteredAlerts.map((alert) => String(alert.id));
     const filteredAlertIdsKey = filteredAlertIds.join("|");
@@ -372,7 +342,7 @@ export function Alerts() {
         });
     };
 
-    const visibleAlerts = filteredAlerts.slice(0, displayedCount);
+    const visibleAlerts = filteredAlerts;
     const selectedAlertDecisions = selectedAlert?.decisions ?? [];
     const visibleSelectedAlertDecisions = selectedAlertDecisions.slice(0, displayedDecisionCount);
     const selectedAlertEvents = selectedAlert && hasAlertEvents(selectedAlert) ? selectedAlert.events ?? [] : [];
@@ -391,11 +361,10 @@ export function Alerts() {
 
     return (
         <div className="space-y-6">
-            {(filteredAlerts.length !== alerts.length) && (
-                <div className="text-sm text-gray-500">
-                    Showing {filteredAlerts.length} of {alerts.length} alerts
-                </div>
-            )}
+            <div className="text-sm text-gray-500">
+                {totalAlerts > 0 ? `Showing ${(currentPage - 1) * PAGE_SIZE + 1}-${Math.min(currentPage * PAGE_SIZE, totalAlerts)} of ${totalAlerts} alerts` : 'No alerts found'}
+                {totalPages > 1 && ` (page ${currentPage} of ${totalPages})`}
+            </div>
 
             <div className="flex items-center gap-3">
                 <button
@@ -510,9 +479,7 @@ export function Alerts() {
                                     />
                                 </th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Time</th>
-                                {machineFeaturesEnabled && (
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Machine</th>
-                                )}
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Machine</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Scenario</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Country</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">AS</th>
@@ -523,18 +490,16 @@ export function Alerts() {
                         </thead>
                         <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                             {loading ? (
-                                <tr><td colSpan={machineFeaturesEnabled ? 9 : 8} className="px-6 py-4 text-center text-sm text-gray-500">Loading alerts...</td></tr>
+                                <tr><td colSpan={9} className="px-6 py-4 text-center text-sm text-gray-500">Loading alerts...</td></tr>
                             ) : visibleAlerts.length === 0 ? (
-                                <tr><td colSpan={machineFeaturesEnabled ? 9 : 8} className="px-6 py-4 text-center text-sm text-gray-500">No alerts found</td></tr>
+                                <tr><td colSpan={9} className="px-6 py-4 text-center text-sm text-gray-500">No alerts found</td></tr>
                             ) : (
-                                visibleAlerts.map((alert, index) => {
-                                    const isLastElement = index === visibleAlerts.length - 1;
+                                visibleAlerts.map((alert) => {
                                     const sourceValue = getAlertSourceValue(alert.source);
                                     const isSelected = selectedAlertIds.includes(String(alert.id));
                                     return (
                                         <tr
                                             key={alert.id}
-                                            ref={isLastElement ? lastAlertElementRef : null}
                                             onClick={() => handleAlertClick(alert)}
                                             className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors cursor-pointer"
                                         >
@@ -550,11 +515,9 @@ export function Alerts() {
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
                                                 <TimeDisplay timestamp={alert.created_at} />
                                             </td>
-                                            {machineFeaturesEnabled && (
-                                                <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400 max-w-[120px] truncate" title={resolveMachineName(alert)}>
-                                                    {resolveMachineName(alert) || "-"}
-                                                </td>
-                                            )}
+                                            <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400 max-w-[120px] truncate" title={alert.machine_alias || alert.machine_id || undefined}>
+                                                {alert.machine_alias || alert.machine_id || "-"}
+                                            </td>
                                             <td className="px-6 py-4 text-sm text-gray-900 dark:text-gray-100 max-w-[200px]" title={alert.scenario}>
                                                 <ScenarioName
                                                     name={alert.scenario}
@@ -657,6 +620,48 @@ export function Alerts() {
                 </div>
             </div>
 
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+                <div className="flex items-center justify-between">
+                    <div className="text-sm text-gray-500 dark:text-gray-400">
+                        {totalAlerts} alerts total
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => { setCurrentPage(1); loadAlerts(false, 1); }}
+                            disabled={currentPage <= 1}
+                            className="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                            First
+                        </button>
+                        <button
+                            onClick={() => { const p = currentPage - 1; setCurrentPage(p); loadAlerts(false, p); }}
+                            disabled={currentPage <= 1}
+                            className="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                            Previous
+                        </button>
+                        <span className="px-3 py-1.5 text-sm text-gray-700 dark:text-gray-300">
+                            Page {currentPage} of {totalPages}
+                        </span>
+                        <button
+                            onClick={() => { const p = currentPage + 1; setCurrentPage(p); loadAlerts(false, p); }}
+                            disabled={currentPage >= totalPages}
+                            className="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                            Next
+                        </button>
+                        <button
+                            onClick={() => { setCurrentPage(totalPages); loadAlerts(false, totalPages); }}
+                            disabled={currentPage >= totalPages}
+                            className="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                            Last
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Alert Details Modal */}
             <Modal
                 isOpen={!!selectedAlert}
@@ -676,15 +681,18 @@ export function Alerts() {
                         </p>
 
                         {/* Summary Cards */}
-                        <div className={`grid grid-cols-1 ${machineFeaturesEnabled ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
-                            {machineFeaturesEnabled && (
-                                <div className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-100 dark:border-gray-700/50">
-                                    <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Machine</h4>
-                                    <div className="text-lg text-gray-900 dark:text-gray-100 font-medium">
-                                        {resolveMachineName(selectedAlert) || "-"}
-                                    </div>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                            <div className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-100 dark:border-gray-700/50">
+                                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Machine</h4>
+                                <div className="text-lg text-gray-900 dark:text-gray-100 font-medium">
+                                    {selectedAlert.machine_alias || selectedAlert.machine_id || "-"}
                                 </div>
-                            )}
+                                {selectedAlert.machine_alias && selectedAlert.machine_id && selectedAlert.machine_alias !== selectedAlert.machine_id && (
+                                    <div className="text-xs text-gray-400 font-mono mt-1">
+                                        {selectedAlert.machine_id}
+                                    </div>
+                                )}
+                            </div>
                             <div className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-100 dark:border-gray-700/50">
                                 <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Scenario</h4>
                                 <div className="font-medium text-gray-900 dark:text-gray-100 break-words">

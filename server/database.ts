@@ -78,6 +78,18 @@ export interface DecisionUpdateParams {
   $raw_data: string;
 }
 
+export interface AlertSearchFilters {
+  q?: string;
+  ip?: string;
+  scenario?: string;
+  country?: string;
+  as_name?: string;
+  target?: string;
+  dateStart?: string;
+  dateEnd?: string;
+  simulated?: boolean;
+}
+
 export interface DatabaseOptions {
   dbDir?: string;
   dbPath?: string;
@@ -379,6 +391,65 @@ export class CrowdsecDatabase {
 
   countAlertsSince(since: string): number {
     return (this.countAlertsSinceStatement.get({ $since: since }) as CountRow).count;
+  }
+
+  searchAlertsPaginated(since: string, filters: AlertSearchFilters, limit: number, offset: number): RowWithRawData[] {
+    const { sql, params } = this.buildAlertSearchQuery(since, filters, false);
+    const stmt = this.db.prepare(`${sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`);
+    return stmt.all(...params, limit, offset) as RowWithRawData[];
+  }
+
+  countSearchAlerts(since: string, filters: AlertSearchFilters): number {
+    const { sql, params } = this.buildAlertSearchQuery(since, filters, true);
+    const stmt = this.db.prepare(sql);
+    return (stmt.get(...params) as CountRow).count;
+  }
+
+  private buildAlertSearchQuery(since: string, filters: AlertSearchFilters, countOnly: boolean): { sql: string; params: unknown[] } {
+    const conditions: string[] = ['created_at >= ?'];
+    const params: unknown[] = [since];
+
+    if (filters.q) {
+      const like = `%${filters.q}%`;
+      conditions.push(`(scenario LIKE ? OR source_ip LIKE ? OR source_cn LIKE ? OR source_as_name LIKE ? OR target LIKE ? OR message LIKE ?)`);
+      params.push(like, like, like, like, like, like);
+    }
+    if (filters.ip) {
+      conditions.push('source_ip LIKE ?');
+      params.push(`%${filters.ip}%`);
+    }
+    if (filters.scenario) {
+      conditions.push('scenario LIKE ?');
+      params.push(`%${filters.scenario}%`);
+    }
+    if (filters.country) {
+      conditions.push('source_cn LIKE ?');
+      params.push(`%${filters.country}%`);
+    }
+    if (filters.as_name) {
+      conditions.push('source_as_name LIKE ?');
+      params.push(`%${filters.as_name}%`);
+    }
+    if (filters.target) {
+      conditions.push('target LIKE ?');
+      params.push(`%${filters.target}%`);
+    }
+    if (filters.dateStart) {
+      conditions.push('created_at >= ?');
+      params.push(filters.dateStart);
+    }
+    if (filters.dateEnd) {
+      conditions.push('created_at <= ?');
+      params.push(filters.dateEnd);
+    }
+    if (filters.simulated !== undefined) {
+      conditions.push('simulated = ?');
+      params.push(filters.simulated ? 1 : 0);
+    }
+
+    const where = conditions.join(' AND ');
+    const select = countOnly ? 'SELECT COUNT(*) as count' : 'SELECT raw_data';
+    return { sql: `${select} FROM alerts WHERE ${where}`, params };
   }
 
   getActiveDecisionsPaginated(now: string, limit: number, offset: number): RowWithRawData[] {
