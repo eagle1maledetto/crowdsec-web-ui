@@ -1615,9 +1615,6 @@ describe('createApp', () => {
         if (url.includes('/v1/alerts?') && url.includes('scope=ip')) {
           return Response.json([crowdsecAlert]);
         }
-        if (url.includes('/v1/alerts?') && !url.includes('scope=')) {
-          return Response.json([]);
-        }
         return undefined;
       },
     });
@@ -1626,10 +1623,9 @@ describe('createApp', () => {
     expect(alerts.status).toBe(200);
 
     const alertRequests = fetchCalls.filter((call) => call.url.includes('/v1/alerts?'));
-    expect(alertRequests).toHaveLength(6);
+    expect(alertRequests).toHaveLength(4);
     expect(alertRequests.some((call) => call.url.includes('scope=ip'))).toBe(true);
     expect(alertRequests.some((call) => call.url.includes('scope=range'))).toBe(true);
-    expect(alertRequests.some((call) => !call.url.includes('scope='))).toBe(true);
     expect(alertRequests.every((call) => !call.url.includes('origin='))).toBe(true);
     expect(alertRequests.every((call) => !call.url.includes('scenario='))).toBe(true);
 
@@ -1719,16 +1715,14 @@ describe('createApp', () => {
     );
 
     const alertRequests = fetchCalls.filter((call) => call.url.includes('/v1/alerts?'));
-    expect(alertRequests).toHaveLength(12);
+    expect(alertRequests).toHaveLength(8);
     expect(alertRequests.some((call) => call.url.includes('origin=crowdsec'))).toBe(true);
     expect(alertRequests.some((call) => call.url.includes('scenario=manual%2Fweb-ui'))).toBe(true);
     expect(alertRequests.every((call) => call.url.includes('origin=') || call.url.includes('scenario='))).toBe(true);
     expect(alertRequests.some((call) => call.url.includes('origin=crowdsec') && call.url.includes('scope=ip'))).toBe(true);
     expect(alertRequests.some((call) => call.url.includes('origin=crowdsec') && call.url.includes('scope=range'))).toBe(true);
-    expect(alertRequests.some((call) => call.url.includes('origin=crowdsec') && !call.url.includes('scope='))).toBe(true);
     expect(alertRequests.some((call) => call.url.includes('scenario=manual%2Fweb-ui') && call.url.includes('scope=ip'))).toBe(true);
     expect(alertRequests.some((call) => call.url.includes('scenario=manual%2Fweb-ui') && call.url.includes('scope=range'))).toBe(true);
-    expect(alertRequests.some((call) => call.url.includes('scenario=manual%2Fweb-ui') && !call.url.includes('scope='))).toBe(true);
     expect(alertRequests.every((call) => !call.url.match(/[?&]scope=ip&scope=range/))).toBe(true);
 
     const alertCount = (database.db.query('SELECT COUNT(*) AS count FROM alerts').get() as { count: number }).count;

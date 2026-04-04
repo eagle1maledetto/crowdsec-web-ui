@@ -233,7 +233,7 @@ export class LapiClient {
 
     const scopes = isCapiOrigin
       ? [undefined]
-      : ['ip', 'range', undefined] as const;
+      : ['ip', 'range'] as const;
     const resultSets = await Promise.all(scopes.map(async (scope) => {
       const scopeLabel = scope || 'unscoped';
       try {
