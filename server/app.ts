@@ -447,7 +447,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
           ? database.searchDecisionsPaginated(now, filters, pageSize, offset)
           : database.getActiveDecisionsPaginated(now, pageSize, offset);
 
-        let decisions = rows.map((row) => toDecisionListItem(JSON.parse(row.raw_data) as AlertDecision & Record<string, unknown>, false));
+        let decisions = rows.map((row) => toDecisionListItem(JSON.parse(row.raw_data) as AlertDecision & Record<string, unknown>, false, row.created_at));
         if (!config.simulationsEnabled) {
           decisions = decisions.filter((decision) => !decision.simulated);
         }
@@ -468,12 +468,12 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         ? database.getDecisionsSince(since, now)
         : database.getActiveDecisions(now);
 
-      let decisions = rows.map((row) => toDecisionListItem(JSON.parse(row.raw_data) as AlertDecision & Record<string, unknown>, includeExpired));
+      let decisions = rows.map((row) => toDecisionListItem(JSON.parse(row.raw_data) as AlertDecision & Record<string, unknown>, includeExpired, row.created_at));
       if (!config.simulationsEnabled) {
         decisions = decisions.filter((decision) => !decision.simulated);
       }
       decisions = markDuplicateDecisions(decisions);
-      decisions.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+      decisions.sort((left, right) => new Date(right.created_at || 0).getTime() - new Date(left.created_at || 0).getTime());
 
       return context.json(decisions);
     } catch (error: any) {
@@ -2018,6 +2018,7 @@ function applySimulationModeToAlert(alert: AlertRecord, simulationsEnabled: bool
 function toDecisionListItem(
   decision: AlertDecision & Record<string, unknown>,
   includeExpired: boolean,
+  fallbackCreatedAt?: string,
 ): DecisionListItem {
   const expired = includeExpired
     ? Boolean(decision.stop_at && new Date(String(decision.stop_at)) < new Date())
@@ -2025,7 +2026,7 @@ function toDecisionListItem(
 
   return {
     id: decision.id,
-    created_at: String(decision.created_at || ''),
+    created_at: String(decision.created_at || fallbackCreatedAt || ''),
     machine: typeof decision.machine === 'string' ? decision.machine : undefined,
     scenario: typeof decision.scenario === 'string' ? decision.scenario : undefined,
     value: typeof decision.value === 'string' ? decision.value : undefined,
