@@ -25,6 +25,12 @@ export interface AlertInsertParams {
   $created_at: string;
   $scenario?: string;
   $source_ip?: string;
+  $source_cn?: string;
+  $source_as_name?: string;
+  $source_scope?: string;
+  $source_range?: string;
+  $target?: string;
+  $simulated?: number;
   $message: string;
   $raw_data: string;
 }
@@ -39,13 +45,60 @@ export interface DecisionInsertParams {
   $type?: string;
   $origin?: string;
   $scenario?: string;
+  $target?: string;
+  $simulated?: number;
   $raw_data: string;
+}
+
+export interface StatsAlertRow {
+  created_at: string;
+  scenario: string | null;
+  source_ip: string | null;
+  source_cn: string | null;
+  source_as_name: string | null;
+  source_scope: string | null;
+  source_range: string | null;
+  target: string | null;
+  simulated: number;
+}
+
+export interface StatsDecisionRow {
+  id: string;
+  created_at: string;
+  scenario: string | null;
+  value: string | null;
+  stop_at: string;
+  target: string | null;
+  simulated: number;
 }
 
 export interface DecisionUpdateParams {
   $id: string;
   $stop_at: string;
   $raw_data: string;
+}
+
+export interface AlertSearchFilters {
+  q?: string;
+  ip?: string;
+  scenario?: string;
+  country?: string;
+  as_name?: string;
+  target?: string;
+  dateStart?: string;
+  dateEnd?: string;
+  simulated?: boolean;
+}
+
+export interface DecisionSearchFilters {
+  q?: string;
+  ip?: string;
+  scenario?: string;
+  type?: string;
+  origin?: string;
+  dateStart?: string;
+  dateEnd?: string;
+  simulated?: boolean;
 }
 
 export interface DatabaseOptions {
@@ -91,7 +144,13 @@ export class CrowdsecDatabase {
   private readonly getAlertsBetweenStatement: any;
   private readonly countAlertsStatement: any;
   private readonly deleteOldAlertsStatement: any;
+  private readonly getAlertStatsSinceStatement: any;
+  private readonly getAlertsSincePaginatedStatement: any;
+  private readonly countAlertsSinceStatement: any;
   private readonly insertDecisionStatement: any;
+  private readonly getDecisionStatsSinceStatement: any;
+  private readonly getActiveDecisionsPaginatedStatement: any;
+  private readonly countActiveDecisionsStatement: any;
   private readonly updateDecisionStatement: any;
   private readonly getActiveDecisionsStatement: any;
   private readonly getDecisionsSinceStatement: any;
@@ -129,8 +188,8 @@ export class CrowdsecDatabase {
     initSchema(this.db);
 
     this.insertAlertStatement = this.db.query(`
-      INSERT OR REPLACE INTO alerts (id, uuid, created_at, scenario, source_ip, message, raw_data)
-      VALUES ($id, $uuid, $created_at, $scenario, $source_ip, $message, $raw_data)
+      INSERT OR REPLACE INTO alerts (id, uuid, created_at, scenario, source_ip, source_cn, source_as_name, source_scope, source_range, target, simulated, message, raw_data)
+      VALUES ($id, $uuid, $created_at, $scenario, $source_ip, $source_cn, $source_as_name, $source_scope, $source_range, $target, $simulated, $message, $raw_data)
     `);
 
     this.getAlertsStatement = this.db.query(`
@@ -147,9 +206,47 @@ export class CrowdsecDatabase {
     this.countAlertsStatement = this.db.query('SELECT COUNT(*) as count FROM alerts');
     this.deleteOldAlertsStatement = this.db.query('DELETE FROM alerts WHERE created_at < $cutoff');
 
+    this.getAlertStatsSinceStatement = this.db.query(`
+      SELECT created_at, scenario, source_ip, source_cn, source_as_name, source_scope, source_range, target, simulated
+      FROM alerts
+      WHERE created_at >= $since
+      ORDER BY created_at DESC
+    `);
+
+    this.getAlertsSincePaginatedStatement = this.db.query(`
+      SELECT raw_data FROM alerts
+      WHERE created_at >= $since
+      ORDER BY created_at DESC
+      LIMIT $limit OFFSET $offset
+    `);
+
+    this.countAlertsSinceStatement = this.db.query(`
+      SELECT COUNT(*) as count FROM alerts
+      WHERE created_at >= $since
+    `);
+
     this.insertDecisionStatement = this.db.query(`
-      INSERT OR REPLACE INTO decisions (id, uuid, alert_id, created_at, stop_at, value, type, origin, scenario, raw_data)
-      VALUES ($id, $uuid, $alert_id, $created_at, $stop_at, $value, $type, $origin, $scenario, $raw_data)
+      INSERT OR REPLACE INTO decisions (id, uuid, alert_id, created_at, stop_at, value, type, origin, scenario, target, simulated, raw_data)
+      VALUES ($id, $uuid, $alert_id, $created_at, $stop_at, $value, $type, $origin, $scenario, $target, $simulated, $raw_data)
+    `);
+
+    this.getDecisionStatsSinceStatement = this.db.query(`
+      SELECT id, created_at, scenario, value, stop_at, target, simulated
+      FROM decisions
+      WHERE created_at >= $since OR stop_at > $now
+      ORDER BY stop_at DESC
+    `);
+
+    this.getActiveDecisionsPaginatedStatement = this.db.query(`
+      SELECT raw_data, created_at FROM decisions
+      WHERE stop_at > $now
+      ORDER BY stop_at DESC
+      LIMIT $limit OFFSET $offset
+    `);
+
+    this.countActiveDecisionsStatement = this.db.query(`
+      SELECT COUNT(*) as count FROM decisions
+      WHERE stop_at > $now
     `);
 
     this.updateDecisionStatement = this.db.query(`
@@ -291,6 +388,144 @@ export class CrowdsecDatabase {
     return this.deleteOldAlertsStatement.run({ $cutoff: cutoff }).changes;
   }
 
+  getAlertStatsSince(since: string): StatsAlertRow[] {
+    return this.getAlertStatsSinceStatement.all({ $since: since }) as StatsAlertRow[];
+  }
+
+  getDecisionStatsSince(since: string, now: string): StatsDecisionRow[] {
+    return this.getDecisionStatsSinceStatement.all({ $since: since, $now: now }) as StatsDecisionRow[];
+  }
+
+  getAlertsSincePaginated(since: string, limit: number, offset: number): RowWithRawData[] {
+    return this.getAlertsSincePaginatedStatement.all({ $since: since, $limit: limit, $offset: offset }) as RowWithRawData[];
+  }
+
+  countAlertsSince(since: string): number {
+    return (this.countAlertsSinceStatement.get({ $since: since }) as CountRow).count;
+  }
+
+  searchAlertsPaginated(since: string, filters: AlertSearchFilters, limit: number, offset: number): RowWithRawData[] {
+    const { sql, params } = this.buildAlertSearchQuery(since, filters, false);
+    const stmt = this.db.prepare(`${sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`);
+    return stmt.all(...params, limit, offset) as RowWithRawData[];
+  }
+
+  countSearchAlerts(since: string, filters: AlertSearchFilters): number {
+    const { sql, params } = this.buildAlertSearchQuery(since, filters, true);
+    const stmt = this.db.prepare(sql);
+    return (stmt.get(...params) as CountRow).count;
+  }
+
+  private buildAlertSearchQuery(since: string, filters: AlertSearchFilters, countOnly: boolean): { sql: string; params: unknown[] } {
+    const conditions: string[] = ['created_at >= ?'];
+    const params: unknown[] = [since];
+
+    if (filters.q) {
+      const like = `%${filters.q}%`;
+      conditions.push(`(scenario LIKE ? OR source_ip LIKE ? OR source_cn LIKE ? OR source_as_name LIKE ? OR target LIKE ? OR message LIKE ?)`);
+      params.push(like, like, like, like, like, like);
+    }
+    if (filters.ip) {
+      conditions.push('source_ip LIKE ?');
+      params.push(`%${filters.ip}%`);
+    }
+    if (filters.scenario) {
+      conditions.push('scenario LIKE ?');
+      params.push(`%${filters.scenario}%`);
+    }
+    if (filters.country) {
+      conditions.push('source_cn LIKE ?');
+      params.push(`%${filters.country}%`);
+    }
+    if (filters.as_name) {
+      conditions.push('source_as_name LIKE ?');
+      params.push(`%${filters.as_name}%`);
+    }
+    if (filters.target) {
+      conditions.push('target LIKE ?');
+      params.push(`%${filters.target}%`);
+    }
+    if (filters.dateStart) {
+      conditions.push('created_at >= ?');
+      params.push(filters.dateStart);
+    }
+    if (filters.dateEnd) {
+      conditions.push('created_at <= ?');
+      params.push(filters.dateEnd);
+    }
+    if (filters.simulated !== undefined) {
+      conditions.push('simulated = ?');
+      params.push(filters.simulated ? 1 : 0);
+    }
+
+    const where = conditions.join(' AND ');
+    const select = countOnly ? 'SELECT COUNT(*) as count' : 'SELECT raw_data';
+    return { sql: `${select} FROM alerts WHERE ${where}`, params };
+  }
+
+  getActiveDecisionsPaginated(now: string, limit: number, offset: number): RowWithRawData[] {
+    return this.getActiveDecisionsPaginatedStatement.all({ $now: now, $limit: limit, $offset: offset }) as RowWithRawData[];
+  }
+
+  countActiveDecisions(now: string): number {
+    return (this.countActiveDecisionsStatement.get({ $now: now }) as CountRow).count;
+  }
+
+  searchDecisionsPaginated(now: string, filters: DecisionSearchFilters, limit: number, offset: number): RowWithRawData[] {
+    const { sql, params } = this.buildDecisionSearchQuery(now, filters, false);
+    const stmt = this.db.prepare(`${sql} ORDER BY stop_at DESC LIMIT ? OFFSET ?`);
+    return stmt.all(...params, limit, offset) as RowWithRawData[];
+  }
+
+  countSearchDecisions(now: string, filters: DecisionSearchFilters): number {
+    const { sql, params } = this.buildDecisionSearchQuery(now, filters, true);
+    const stmt = this.db.prepare(sql);
+    return (stmt.get(...params) as CountRow).count;
+  }
+
+  private buildDecisionSearchQuery(now: string, filters: DecisionSearchFilters, countOnly: boolean): { sql: string; params: unknown[] } {
+    const conditions: string[] = ['stop_at > ?'];
+    const params: unknown[] = [now];
+
+    if (filters.q) {
+      const like = `%${filters.q}%`;
+      conditions.push(`(value LIKE ? OR scenario LIKE ? OR type LIKE ? OR origin LIKE ? OR target LIKE ?)`);
+      params.push(like, like, like, like, like);
+    }
+    if (filters.ip) {
+      conditions.push('value LIKE ?');
+      params.push(`%${filters.ip}%`);
+    }
+    if (filters.scenario) {
+      conditions.push('scenario LIKE ?');
+      params.push(`%${filters.scenario}%`);
+    }
+    if (filters.type) {
+      conditions.push('type LIKE ?');
+      params.push(`%${filters.type}%`);
+    }
+    if (filters.origin) {
+      conditions.push('origin LIKE ?');
+      params.push(`%${filters.origin}%`);
+    }
+    if (filters.dateStart) {
+      conditions.push('created_at >= ?');
+      params.push(filters.dateStart);
+    }
+    if (filters.dateEnd) {
+      conditions.push('created_at <= ?');
+      params.push(filters.dateEnd);
+    }
+    if (filters.simulated !== undefined) {
+      conditions.push('simulated = ?');
+      params.push(filters.simulated ? 1 : 0);
+    }
+
+    const where = conditions.join(' AND ');
+    const select = countOnly ? 'SELECT COUNT(*) as count' : 'SELECT raw_data, created_at';
+    return { sql: `${select} FROM decisions WHERE ${where}`, params };
+  }
+
   insertDecision(params: DecisionInsertParams): void {
     this.insertDecisionStatement.run(params);
   }
@@ -317,6 +552,25 @@ export class CrowdsecDatabase {
 
   getDecisionById(id: string | number): { raw_data: string; stop_at: string } | null {
     return (this.getDecisionByIdStatement.get({ $id: String(id) }) as { raw_data: string; stop_at: string } | null) || null;
+  }
+
+  getDecisionStopAtBatch(ids: string[]): Map<string, string> {
+    const result = new Map<string, string>();
+    if (ids.length === 0) return result;
+
+    const CHUNK_SIZE = 900;
+    for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+      const chunk = ids.slice(i, i + CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const stmt = this.db.prepare(
+        `SELECT id, stop_at FROM decisions WHERE id IN (${placeholders})`
+      );
+      const rows = stmt.all(...chunk) as Array<{ id: string; stop_at: string }>;
+      for (const row of rows) {
+        result.set(String(row.id), row.stop_at);
+      }
+    }
+    return result;
   }
 
   getActiveDecisionByValue(value: string, now: string): { raw_data: string; stop_at: string } | null {
@@ -493,6 +747,11 @@ function openDatabase(dbPath: string): Database {
   try {
     const database = createDatabase(dbPath);
     database.exec('PRAGMA journal_mode = WAL');
+    database.exec('PRAGMA synchronous = NORMAL');
+    database.exec('PRAGMA cache_size = -32000');
+    database.exec('PRAGMA temp_store = MEMORY');
+    database.exec('PRAGMA busy_timeout = 5000');
+    database.exec('PRAGMA mmap_size = 268435456');
     return database;
   } catch (error: any) {
     if (dbPath.startsWith('/app/data') && error?.code === 'EACCES') {
@@ -556,6 +815,9 @@ function initSchema(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_decisions_stop_at ON decisions(stop_at);
     CREATE INDEX IF NOT EXISTS idx_decisions_alert_id ON decisions(alert_id);
+    CREATE INDEX IF NOT EXISTS idx_decisions_value ON decisions(value);
+    CREATE INDEX IF NOT EXISTS idx_decisions_created_at ON decisions(created_at);
+    CREATE INDEX IF NOT EXISTS idx_decisions_value_stop_at ON decisions(value, stop_at DESC);
   `;
 
   const createMetaTable = `
@@ -685,6 +947,29 @@ function initSchema(db: Database): void {
   migrateNotificationsTable(db, createNotificationsTable);
   db.exec(createNotificationIncidentsTable);
   seedNotificationIncidentsFromHistoryIfEmpty(db);
+  migrateStatsColumns(db);
+}
+
+function migrateStatsColumns(db: Database): void {
+  const alertCols = db.query('PRAGMA table_info(alerts)').all() as Array<{ name: string }>;
+  const alertColNames = new Set(alertCols.map((c) => c.name));
+
+  if (!alertColNames.has('source_cn')) {
+    db.exec('ALTER TABLE alerts ADD COLUMN source_cn TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN source_as_name TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN source_scope TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN source_range TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN target TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN simulated INTEGER DEFAULT 0');
+  }
+
+  const decisionCols = db.query('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+  const decisionColNames = new Set(decisionCols.map((c) => c.name));
+
+  if (!decisionColNames.has('target')) {
+    db.exec('ALTER TABLE decisions ADD COLUMN target TEXT');
+    db.exec('ALTER TABLE decisions ADD COLUMN simulated INTEGER DEFAULT 0');
+  }
 }
 
 function migrateNotificationRulesTable(db: Database, createNotificationRulesTable: string): void {

@@ -24,7 +24,7 @@ import type {
   UpdateCheckResponse,
 } from '../shared/contracts';
 import { createRuntimeConfig, getIntervalName, parseRefreshInterval, type RuntimeConfig } from './config';
-import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams } from './database';
+import { CrowdsecDatabase, type AlertInsertParams, type AlertSearchFilters, type DecisionInsertParams, type DecisionSearchFilters, type StatsAlertRow, type StatsDecisionRow } from './database';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
@@ -174,6 +174,39 @@ export function createApp(options: CreateAppOptions = {}): AppController {
   let bootstrapPromise: Promise<boolean> | null = null;
   let bootstrapWaitLogged = false;
 
+  // Response cache: avoids recomputing API responses between syncs
+  interface ResponseCacheEntry<T> {
+    data: T;
+    generatedAt: number;
+  }
+
+  const responseCache: {
+    statsAlerts: ResponseCacheEntry<StatsAlert[]> | null;
+    statsDecisions: ResponseCacheEntry<StatsDecision[]> | null;
+    alerts: ResponseCacheEntry<SlimAlert[]> | null;
+    decisions: ResponseCacheEntry<unknown[]> | null;
+  } = {
+    statsAlerts: null,
+    statsDecisions: null,
+    alerts: null,
+    decisions: null,
+  };
+
+  function invalidateResponseCache(): void {
+    responseCache.statsAlerts = null;
+    responseCache.statsDecisions = null;
+    responseCache.alerts = null;
+    responseCache.decisions = null;
+  }
+
+  function getResponseCacheTtl(): number {
+    return Math.max(refreshIntervalMs, 5000);
+  }
+
+  function isResponseCacheValid<T>(entry: ResponseCacheEntry<T> | null): entry is ResponseCacheEntry<T> {
+    return entry !== null && (Date.now() - entry.generatedAt) < getResponseCacheTtl();
+  }
+
   console.log(`Cache Configuration:
   Lookback Period: ${config.lookbackPeriod} (${config.lookbackMs}ms)
   Refresh Interval: ${getIntervalName(refreshIntervalMs)} (${persistedConfig.refresh_interval_ms !== undefined ? 'from saved config' : 'from env'})
@@ -220,13 +253,72 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       }
 
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
-      const alerts = database
-        .getAlertsSince(since)
-        .map((row) => applySimulationModeToAlert(hydrateAlertWithDecisions(JSON.parse(row.raw_data) as AlertRecord), config.simulationsEnabled))
+      const pageParam = context.req.query('page');
+
+      if (pageParam) {
+        const page = Math.max(1, Number(pageParam) || 1);
+        const pageSize = Math.min(500, Math.max(10, Number(context.req.query('page_size')) || 100));
+        const offset = (page - 1) * pageSize;
+
+        const filters: AlertSearchFilters = {};
+        const q = context.req.query('q');
+        const ip = context.req.query('ip');
+        const scenario = context.req.query('scenario');
+        const country = context.req.query('country');
+        const asName = context.req.query('as');
+        const target = context.req.query('target');
+        const dateStart = context.req.query('dateStart');
+        const dateEnd = context.req.query('dateEnd');
+        const simulation = context.req.query('simulation');
+
+        if (q) filters.q = q;
+        if (ip) filters.ip = ip;
+        if (scenario) filters.scenario = scenario;
+        if (country) filters.country = country;
+        if (asName) filters.as_name = asName;
+        if (target) filters.target = target;
+        if (dateStart) filters.dateStart = dateStart;
+        if (dateEnd) filters.dateEnd = dateEnd;
+        if (simulation === 'simulated') filters.simulated = true;
+        if (simulation === 'live') filters.simulated = false;
+        if (!config.simulationsEnabled) filters.simulated = false;
+
+        const hasFilters = Object.keys(filters).length > 0;
+
+        const total = hasFilters
+          ? database.countSearchAlerts(since, filters)
+          : database.countAlertsSince(since);
+        const rows = hasFilters
+          ? database.searchAlertsPaginated(since, filters, pageSize, offset)
+          : database.getAlertsSincePaginated(since, pageSize, offset);
+        const alerts = hydrateAlertsBatch(rows)
+          .map((alert) => applySimulationModeToAlert(alert, config.simulationsEnabled))
+          .filter((alert): alert is AlertRecord => alert !== null)
+          .map((alert) => toSlimAlert(alert));
+
+        return context.json({
+          data: alerts,
+          pagination: {
+            page,
+            page_size: pageSize,
+            total,
+            total_pages: Math.ceil(total / pageSize),
+          },
+        });
+      }
+
+      if (isResponseCacheValid(responseCache.alerts)) {
+        return context.json(responseCache.alerts.data);
+      }
+
+      const rows = database.getAlertsSince(since);
+      const alerts = hydrateAlertsBatch(rows)
+        .map((alert) => applySimulationModeToAlert(alert, config.simulationsEnabled))
         .filter((alert): alert is AlertRecord => alert !== null)
         .map((alert) => toSlimAlert(alert))
         .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
+      responseCache.alerts = { data: alerts, generatedAt: Date.now() };
       return context.json(alerts);
     } catch (error: any) {
       console.error('Error serving alerts from database:', error.message);
@@ -316,6 +408,60 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       const includeExpired = context.req.query('include_expired') === 'true';
       const now = new Date().toISOString();
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
+      const pageParam = context.req.query('page');
+
+      if (pageParam && !includeExpired) {
+        const page = Math.max(1, Number(pageParam) || 1);
+        const pageSize = Math.min(500, Math.max(10, Number(context.req.query('page_size')) || 100));
+        const offset = (page - 1) * pageSize;
+
+        const filters: DecisionSearchFilters = {};
+        const q = context.req.query('q');
+        const ip = context.req.query('ip');
+        const scenario = context.req.query('scenario');
+        const type = context.req.query('type');
+        const origin = context.req.query('origin');
+        const dateStart = context.req.query('dateStart');
+        const dateEnd = context.req.query('dateEnd');
+        const simulation = context.req.query('simulation');
+
+        if (q) filters.q = q;
+        if (ip) filters.ip = ip;
+        if (scenario) filters.scenario = scenario;
+        if (type) filters.type = type;
+        if (origin) filters.origin = origin;
+        if (dateStart) filters.dateStart = dateStart;
+        if (dateEnd) filters.dateEnd = dateEnd;
+        if (simulation === 'simulated') filters.simulated = true;
+        if (simulation === 'live') filters.simulated = false;
+        if (!config.simulationsEnabled) filters.simulated = false;
+
+        const hasFilters = Object.keys(filters).length > 0;
+
+        const total = hasFilters
+          ? database.countSearchDecisions(now, filters)
+          : database.countActiveDecisions(now);
+        const rows = hasFilters
+          ? database.searchDecisionsPaginated(now, filters, pageSize, offset)
+          : database.getActiveDecisionsPaginated(now, pageSize, offset);
+
+        let decisions = rows.map((row) => toDecisionListItem(JSON.parse(row.raw_data) as AlertDecision & Record<string, unknown>, false));
+        if (!config.simulationsEnabled) {
+          decisions = decisions.filter((decision) => !decision.simulated);
+        }
+        decisions = markDuplicateDecisions(decisions);
+
+        return context.json({
+          data: decisions,
+          pagination: {
+            page,
+            page_size: pageSize,
+            total,
+            total_pages: Math.ceil(total / pageSize),
+          },
+        });
+      }
+
       const rows = includeExpired
         ? database.getDecisionsSince(since, now)
         : database.getActiveDecisions(now);
@@ -493,6 +639,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       cache.isInitialized = false;
       cache.lastUpdate = null;
       isFirstSync = true;
+      invalidateResponseCache();
       await ensureBootstrapReady('manual cache clear');
 
       return context.json({
@@ -516,39 +663,37 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         await ensureBootstrapReady('stats alerts request');
       }
 
+      if (isResponseCacheValid(responseCache.statsAlerts)) {
+        return context.json(responseCache.statsAlerts.data);
+      }
+
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
-      const alerts = database
-        .getAlertsSince(since)
+      const statsRows = database.getAlertStatsSince(since);
+      const alerts: StatsAlert[] = statsRows
+        .filter((row) => config.simulationsEnabled || !row.simulated)
         .map((row) => {
-          const alert = applySimulationModeToAlert(
-            hydrateAlertWithDecisions(JSON.parse(row.raw_data) as AlertRecord),
-            config.simulationsEnabled,
-          );
-          if (!alert) {
-            return null;
-          }
-          const payload: StatsAlert = {
-            created_at: alert.created_at,
-            kind: typeof alert.kind === 'string' ? alert.kind : undefined,
-            scenario: resolveAlertScenario(alert),
-            source: alert.source
+          const resolvedScenario = (row.source_scope && row.scenario?.startsWith('update :') && row.source_scope.includes('/'))
+            ? row.source_scope
+            : (row.scenario || undefined);
+          return {
+            created_at: row.created_at,
+            scenario: resolvedScenario,
+            source: row.source_ip
               ? {
-                  ip: alert.source.ip,
-                  value: alert.source.value,
-                  range: alert.source.range,
-                  cn: alert.source.cn,
-                  as_name: alert.source.as_name,
-                  scope: alert.source.scope,
+                  ip: row.source_ip,
+                  value: row.source_ip,
+                  range: row.source_range || undefined,
+                  cn: row.source_cn || undefined,
+                  as_name: row.source_as_name || undefined,
+                  scope: row.source_scope || undefined,
                 }
               : null,
-            target: alert.target,
-            simulated: isAlertSimulated(alert),
+            target: row.target || undefined,
+            simulated: row.simulated === 1,
           };
-          return payload;
-        })
-        .filter((alert): alert is StatsAlert => alert !== null)
-        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+        });
 
+      responseCache.statsAlerts = { data: alerts, generatedAt: Date.now() };
       return context.json(alerts);
     } catch (error: any) {
       console.error('Error serving stats alerts from database:', error.message);
@@ -566,26 +711,27 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         await ensureBootstrapReady('stats decisions request');
       }
 
+      if (isResponseCacheValid(responseCache.statsDecisions)) {
+        return context.json(responseCache.statsDecisions.data);
+      }
+
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
       const now = new Date().toISOString();
-      const decisions = database
-        .getDecisionsSince(since, now)
-        .map((row) => {
-          const decision = JSON.parse(row.raw_data) as Record<string, unknown>;
-          const payload: StatsDecision = {
-            id: decision.id as string | number,
-            created_at: String(decision.created_at || ''),
-            scenario: typeof decision.scenario === 'string' ? decision.scenario : undefined,
-            value: typeof decision.value === 'string' ? decision.value : undefined,
-            stop_at: typeof decision.stop_at === 'string' ? decision.stop_at : undefined,
-            target: typeof decision.target === 'string' ? decision.target : undefined,
-            simulated: normalizeDecisionSimulated(decision),
-          };
-          return payload;
-        })
-        .filter((decision) => config.simulationsEnabled || !decision.simulated)
+      const statsRows = database.getDecisionStatsSince(since, now);
+      const decisions: StatsDecision[] = statsRows
+        .filter((row) => config.simulationsEnabled || !row.simulated)
+        .map((row) => ({
+          id: row.id,
+          created_at: row.created_at,
+          scenario: row.scenario || undefined,
+          value: row.value || undefined,
+          stop_at: row.stop_at || undefined,
+          target: row.target || undefined,
+          simulated: row.simulated === 1,
+        }))
         .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
+      responseCache.statsDecisions = { data: decisions, generatedAt: Date.now() };
       return context.json(decisions);
     } catch (error: any) {
       console.error('Error serving stats decisions from database:', error.message);
@@ -825,6 +971,12 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       $created_at: alert.created_at,
       $scenario: alert.scenario,
       $source_ip: sourceValue,
+      $source_cn: alertSource?.cn,
+      $source_as_name: alertSource?.as_name,
+      $source_scope: alertSource?.scope,
+      $source_range: alertSource?.range,
+      $target: target,
+      $simulated: enrichedAlert.simulated ? 1 : 0,
       $message: alert.message || '',
       $raw_data: JSON.stringify(enrichedAlert),
     };
@@ -869,6 +1021,8 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         $type: decision.type,
         $origin: enrichedDecision.origin,
         $scenario: enrichedDecision.scenario,
+        $target: target,
+        $simulated: decision.simulated === true ? 1 : 0,
         $raw_data: JSON.stringify(enrichedDecision),
       };
 
@@ -955,6 +1109,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       message: `Sync complete. ${totalAlerts} alerts imported.`,
       completedAt: new Date().toISOString(),
     });
+    invalidateResponseCache();
     console.log(`Historical sync complete. Total imported: ${totalAlerts}`);
 
     return totalAlerts;
@@ -1063,6 +1218,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
       cache.lastUpdate = new Date().toISOString();
       lapiClient.updateStatus(true);
+      invalidateResponseCache();
       console.log(`Delta update complete: ${newAlerts.length} alerts, ${activeDecisionAlerts.length} active decision alerts refreshed`);
     } catch (error: any) {
       console.error('Failed to update cache delta:', error.message);
@@ -1400,6 +1556,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
     result.deleted_alerts = deletedAlertIds.length;
     result.deleted_decisions = deletedDecisionIds.size;
+    invalidateResponseCache();
     return result;
   }
 
@@ -1430,6 +1587,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     }
 
     result.deleted_decisions = deletedDecisionIds.length;
+    invalidateResponseCache();
     return result;
   }
 
@@ -1510,6 +1668,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
     result.deleted_alerts = deletedAlertIds.length;
     result.deleted_decisions = deletedDecisionIds.size;
+    invalidateResponseCache();
     return result;
   }
 
@@ -1583,6 +1742,59 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     clone.simulated = isAlertSimulated(clone);
 
     return clone;
+  }
+
+  function hydrateAlertWithDecisionsBatch(alert: AlertRecord, stopAtMap: Map<string, string>): AlertRecord {
+    const clone: AlertRecord = { ...alert };
+    const decisions = Array.isArray(clone.decisions) ? clone.decisions : [];
+
+    clone.decisions = decisions.map((decision) => {
+      const cachedStopAt = stopAtMap.get(String(decision.id));
+      const now = new Date();
+      const stopAt = cachedStopAt
+        ? new Date(cachedStopAt)
+        : decision.stop_at
+          ? new Date(decision.stop_at)
+          : null;
+      const isExpired = !stopAt || stopAt < now;
+
+      let duration = decision.duration;
+      if (stopAt && !isExpired) {
+        const remainingMs = stopAt.getTime() - now.getTime();
+        const hours = Math.floor(remainingMs / 3_600_000);
+        const minutes = Math.floor((remainingMs % 3_600_000) / 60_000);
+        const seconds = Math.floor((remainingMs % 60_000) / 1_000);
+        duration = `${hours > 0 ? `${hours}h` : ''}${minutes > 0 || hours > 0 ? `${minutes}m` : ''}${seconds}s`;
+      } else if (isExpired) {
+        duration = '0s';
+      }
+
+      return {
+        ...decision,
+        stop_at: stopAt ? stopAt.toISOString() : decision.stop_at,
+        duration,
+        expired: isExpired,
+        simulated: normalizeDecisionSimulated(decision, clone),
+      };
+    });
+
+    clone.reason = resolveAlertReason(clone);
+    clone.scenario = resolveAlertScenario(clone);
+    clone.simulated = isAlertSimulated(clone);
+
+    return clone;
+  }
+
+  function hydrateAlertsBatch(rows: Array<{ raw_data: string }>): AlertRecord[] {
+    const parsedAlerts = rows.map((row) => JSON.parse(row.raw_data) as AlertRecord);
+
+    const allDecisionIds = parsedAlerts.flatMap((alert) =>
+      (Array.isArray(alert.decisions) ? alert.decisions : []).map((d) => String(d.id))
+    );
+
+    const stopAtMap = database.getDecisionStopAtBatch(allDecisionIds);
+
+    return parsedAlerts.map((alert) => hydrateAlertWithDecisionsBatch(alert, stopAtMap));
   }
 
   function normalizeAlertDetail(input: unknown, alertId: string): AlertRecord | null {
