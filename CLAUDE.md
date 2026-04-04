@@ -88,9 +88,9 @@ Raw SQL with prepared statements in `server/database.ts` — no ORM, no migratio
 
 SQLite pragmas configured in `openDatabase()`: WAL mode, `synchronous=NORMAL`, 32MB page cache, memory-mapped I/O (256MB), 5s busy timeout.
 
-### Performance architecture (branch perf/optimizations)
+### Performance architecture
 
-The server has three performance layers for handling large datasets (20k+ alerts):
+The server has several performance layers for handling large datasets (20k+ alerts):
 
 1. **Batch decision hydration** — `hydrateAlertsBatch()` in `app.ts` collects all decision IDs upfront and does a single `getDecisionStopAtBatch()` query instead of N+1 individual lookups. The original `hydrateAlertWithDecisions()` is kept for single-alert detail views.
 
@@ -98,7 +98,13 @@ The server has three performance layers for handling large datasets (20k+ alerts
 
 3. **SQL indexes** — Compound index on `decisions(value, stop_at DESC)` for IP lookup, plus indexes on `decisions(value)` and `decisions(created_at)`.
 
+4. **Materialized stats columns** — `alerts` table has denormalized columns (`source_cn`, `source_as_name`, `source_scope`, `source_range`, `target`, `simulated`) populated during insert. Stats endpoints query these columns directly without JSON.parse. The `raw_data` column is kept for full alert detail views. When adding new fields to stats responses, add them as columns too. Schema migration in `migrateStatsColumns()` adds columns automatically on startup.
+
+5. **Server-side pagination & search** — `/api/alerts` and `/api/decisions` support `?page=N&page_size=N` query params. With `page`: returns `PaginatedResponse` envelope `{ data: [...], pagination: { page, page_size, total, total_pages } }`. Without `page`: returns bare array (backward compatible). Search via `?q=` does SQL LIKE across scenario, source_ip, source_cn, source_as_name, target, message. Additional filter params: `?ip=`, `?scenario=`, `?country=`, `?as=`, `?target=`, `?dateStart=`, `?dateEnd=`, `?simulation=`. Search filters are built dynamically in `buildAlertSearchQuery()` / `buildDecisionSearchQuery()` in `database.ts`.
+
 When modifying data mutation paths (delete alerts/decisions, add decisions, cleanup by IP), always call `invalidateResponseCache()` after the mutation.
+
+When adding columns to alerts/decisions tables, update: the INSERT statement, `AlertInsertParams`/`DecisionInsertParams` interfaces, `processAlertForDatabase()` in `app.ts`, and the `insertAlert`/`insertDecision` calls in test files.
 
 ### Testing
 
