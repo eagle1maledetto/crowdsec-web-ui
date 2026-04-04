@@ -174,6 +174,39 @@ export function createApp(options: CreateAppOptions = {}): AppController {
   let bootstrapPromise: Promise<boolean> | null = null;
   let bootstrapWaitLogged = false;
 
+  // Response cache: avoids recomputing API responses between syncs
+  interface ResponseCacheEntry<T> {
+    data: T;
+    generatedAt: number;
+  }
+
+  const responseCache: {
+    statsAlerts: ResponseCacheEntry<StatsAlert[]> | null;
+    statsDecisions: ResponseCacheEntry<StatsDecision[]> | null;
+    alerts: ResponseCacheEntry<SlimAlert[]> | null;
+    decisions: ResponseCacheEntry<unknown[]> | null;
+  } = {
+    statsAlerts: null,
+    statsDecisions: null,
+    alerts: null,
+    decisions: null,
+  };
+
+  function invalidateResponseCache(): void {
+    responseCache.statsAlerts = null;
+    responseCache.statsDecisions = null;
+    responseCache.alerts = null;
+    responseCache.decisions = null;
+  }
+
+  function getResponseCacheTtl(): number {
+    return Math.max(refreshIntervalMs, 5000);
+  }
+
+  function isResponseCacheValid<T>(entry: ResponseCacheEntry<T> | null): entry is ResponseCacheEntry<T> {
+    return entry !== null && (Date.now() - entry.generatedAt) < getResponseCacheTtl();
+  }
+
   console.log(`Cache Configuration:
   Lookback Period: ${config.lookbackPeriod} (${config.lookbackMs}ms)
   Refresh Interval: ${getIntervalName(refreshIntervalMs)} (${persistedConfig.refresh_interval_ms !== undefined ? 'from saved config' : 'from env'})
@@ -219,14 +252,19 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         await ensureBootstrapReady('alerts request');
       }
 
+      if (isResponseCacheValid(responseCache.alerts)) {
+        return context.json(responseCache.alerts.data);
+      }
+
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
-      const alerts = database
-        .getAlertsSince(since)
-        .map((row) => applySimulationModeToAlert(hydrateAlertWithDecisions(JSON.parse(row.raw_data) as AlertRecord), config.simulationsEnabled))
+      const rows = database.getAlertsSince(since);
+      const alerts = hydrateAlertsBatch(rows)
+        .map((alert) => applySimulationModeToAlert(alert, config.simulationsEnabled))
         .filter((alert): alert is AlertRecord => alert !== null)
         .map((alert) => toSlimAlert(alert))
         .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
+      responseCache.alerts = { data: alerts, generatedAt: Date.now() };
       return context.json(alerts);
     } catch (error: any) {
       console.error('Error serving alerts from database:', error.message);
@@ -493,6 +531,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       cache.isInitialized = false;
       cache.lastUpdate = null;
       isFirstSync = true;
+      invalidateResponseCache();
       await ensureBootstrapReady('manual cache clear');
 
       return context.json({
@@ -516,39 +555,41 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         await ensureBootstrapReady('stats alerts request');
       }
 
+      if (isResponseCacheValid(responseCache.statsAlerts)) {
+        return context.json(responseCache.statsAlerts.data);
+      }
+
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
-      const alerts = database
-        .getAlertsSince(since)
-        .map((row) => {
-          const alert = applySimulationModeToAlert(
-            hydrateAlertWithDecisions(JSON.parse(row.raw_data) as AlertRecord),
-            config.simulationsEnabled,
-          );
-          if (!alert) {
+      const rows = database.getAlertsSince(since);
+      const alerts = hydrateAlertsBatch(rows)
+        .map((alert) => {
+          const filtered = applySimulationModeToAlert(alert, config.simulationsEnabled);
+          if (!filtered) {
             return null;
           }
           const payload: StatsAlert = {
-            created_at: alert.created_at,
-            kind: typeof alert.kind === 'string' ? alert.kind : undefined,
-            scenario: resolveAlertScenario(alert),
-            source: alert.source
+            created_at: filtered.created_at,
+            kind: typeof filtered.kind === 'string' ? filtered.kind : undefined,
+            scenario: resolveAlertScenario(filtered),
+            source: filtered.source
               ? {
-                  ip: alert.source.ip,
-                  value: alert.source.value,
-                  range: alert.source.range,
-                  cn: alert.source.cn,
-                  as_name: alert.source.as_name,
-                  scope: alert.source.scope,
+                  ip: filtered.source.ip,
+                  value: filtered.source.value,
+                  range: filtered.source.range,
+                  cn: filtered.source.cn,
+                  as_name: filtered.source.as_name,
+                  scope: filtered.source.scope,
                 }
               : null,
-            target: alert.target,
-            simulated: isAlertSimulated(alert),
+            target: filtered.target,
+            simulated: isAlertSimulated(filtered),
           };
           return payload;
         })
         .filter((alert): alert is StatsAlert => alert !== null)
         .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
+      responseCache.statsAlerts = { data: alerts, generatedAt: Date.now() };
       return context.json(alerts);
     } catch (error: any) {
       console.error('Error serving stats alerts from database:', error.message);
@@ -564,6 +605,10 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
       if (!cache.isInitialized) {
         await ensureBootstrapReady('stats decisions request');
+      }
+
+      if (isResponseCacheValid(responseCache.statsDecisions)) {
+        return context.json(responseCache.statsDecisions.data);
       }
 
       const since = new Date(Date.now() - config.lookbackMs).toISOString();
@@ -586,6 +631,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         .filter((decision) => config.simulationsEnabled || !decision.simulated)
         .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
+      responseCache.statsDecisions = { data: decisions, generatedAt: Date.now() };
       return context.json(decisions);
     } catch (error: any) {
       console.error('Error serving stats decisions from database:', error.message);
@@ -955,6 +1001,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       message: `Sync complete. ${totalAlerts} alerts imported.`,
       completedAt: new Date().toISOString(),
     });
+    invalidateResponseCache();
     console.log(`Historical sync complete. Total imported: ${totalAlerts}`);
 
     return totalAlerts;
@@ -1063,6 +1110,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
       cache.lastUpdate = new Date().toISOString();
       lapiClient.updateStatus(true);
+      invalidateResponseCache();
       console.log(`Delta update complete: ${newAlerts.length} alerts, ${activeDecisionAlerts.length} active decision alerts refreshed`);
     } catch (error: any) {
       console.error('Failed to update cache delta:', error.message);
@@ -1400,6 +1448,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
     result.deleted_alerts = deletedAlertIds.length;
     result.deleted_decisions = deletedDecisionIds.size;
+    invalidateResponseCache();
     return result;
   }
 
@@ -1430,6 +1479,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     }
 
     result.deleted_decisions = deletedDecisionIds.length;
+    invalidateResponseCache();
     return result;
   }
 
@@ -1510,6 +1560,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
     result.deleted_alerts = deletedAlertIds.length;
     result.deleted_decisions = deletedDecisionIds.size;
+    invalidateResponseCache();
     return result;
   }
 
@@ -1583,6 +1634,59 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     clone.simulated = isAlertSimulated(clone);
 
     return clone;
+  }
+
+  function hydrateAlertWithDecisionsBatch(alert: AlertRecord, stopAtMap: Map<string, string>): AlertRecord {
+    const clone: AlertRecord = { ...alert };
+    const decisions = Array.isArray(clone.decisions) ? clone.decisions : [];
+
+    clone.decisions = decisions.map((decision) => {
+      const cachedStopAt = stopAtMap.get(String(decision.id));
+      const now = new Date();
+      const stopAt = cachedStopAt
+        ? new Date(cachedStopAt)
+        : decision.stop_at
+          ? new Date(decision.stop_at)
+          : null;
+      const isExpired = !stopAt || stopAt < now;
+
+      let duration = decision.duration;
+      if (stopAt && !isExpired) {
+        const remainingMs = stopAt.getTime() - now.getTime();
+        const hours = Math.floor(remainingMs / 3_600_000);
+        const minutes = Math.floor((remainingMs % 3_600_000) / 60_000);
+        const seconds = Math.floor((remainingMs % 60_000) / 1_000);
+        duration = `${hours > 0 ? `${hours}h` : ''}${minutes > 0 || hours > 0 ? `${minutes}m` : ''}${seconds}s`;
+      } else if (isExpired) {
+        duration = '0s';
+      }
+
+      return {
+        ...decision,
+        stop_at: stopAt ? stopAt.toISOString() : decision.stop_at,
+        duration,
+        expired: isExpired,
+        simulated: normalizeDecisionSimulated(decision, clone),
+      };
+    });
+
+    clone.reason = resolveAlertReason(clone);
+    clone.scenario = resolveAlertScenario(clone);
+    clone.simulated = isAlertSimulated(clone);
+
+    return clone;
+  }
+
+  function hydrateAlertsBatch(rows: Array<{ raw_data: string }>): AlertRecord[] {
+    const parsedAlerts = rows.map((row) => JSON.parse(row.raw_data) as AlertRecord);
+
+    const allDecisionIds = parsedAlerts.flatMap((alert) =>
+      (Array.isArray(alert.decisions) ? alert.decisions : []).map((d) => String(d.id))
+    );
+
+    const stopAtMap = database.getDecisionStopAtBatch(allDecisionIds);
+
+    return parsedAlerts.map((alert) => hydrateAlertWithDecisionsBatch(alert, stopAtMap));
   }
 
   function normalizeAlertDetail(input: unknown, alertId: string): AlertRecord | null {
