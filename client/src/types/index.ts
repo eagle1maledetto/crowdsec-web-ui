@@ -27,6 +27,8 @@ export type {
   NotificationSettingsResponse,
   BulkDeleteFailure,
   DecisionListItem,
+  PaginatedResponse,
+  PaginationMeta,
   SlimAlert,
   SlimDecision,
   StatsAlert,

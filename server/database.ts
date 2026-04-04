@@ -25,6 +25,12 @@ export interface AlertInsertParams {
   $created_at: string;
   $scenario?: string;
   $source_ip?: string;
+  $source_cn?: string;
+  $source_as_name?: string;
+  $source_scope?: string;
+  $source_range?: string;
+  $target?: string;
+  $simulated?: number;
   $message: string;
   $raw_data: string;
 }
@@ -39,7 +45,31 @@ export interface DecisionInsertParams {
   $type?: string;
   $origin?: string;
   $scenario?: string;
+  $target?: string;
+  $simulated?: number;
   $raw_data: string;
+}
+
+export interface StatsAlertRow {
+  created_at: string;
+  scenario: string | null;
+  source_ip: string | null;
+  source_cn: string | null;
+  source_as_name: string | null;
+  source_scope: string | null;
+  source_range: string | null;
+  target: string | null;
+  simulated: number;
+}
+
+export interface StatsDecisionRow {
+  id: string;
+  created_at: string;
+  scenario: string | null;
+  value: string | null;
+  stop_at: string;
+  target: string | null;
+  simulated: number;
 }
 
 export interface DecisionUpdateParams {
@@ -91,7 +121,13 @@ export class CrowdsecDatabase {
   private readonly getAlertsBetweenStatement: any;
   private readonly countAlertsStatement: any;
   private readonly deleteOldAlertsStatement: any;
+  private readonly getAlertStatsSinceStatement: any;
+  private readonly getAlertsSincePaginatedStatement: any;
+  private readonly countAlertsSinceStatement: any;
   private readonly insertDecisionStatement: any;
+  private readonly getDecisionStatsSinceStatement: any;
+  private readonly getActiveDecisionsPaginatedStatement: any;
+  private readonly countActiveDecisionsStatement: any;
   private readonly updateDecisionStatement: any;
   private readonly getActiveDecisionsStatement: any;
   private readonly getDecisionsSinceStatement: any;
@@ -129,8 +165,8 @@ export class CrowdsecDatabase {
     initSchema(this.db);
 
     this.insertAlertStatement = this.db.query(`
-      INSERT OR REPLACE INTO alerts (id, uuid, created_at, scenario, source_ip, message, raw_data)
-      VALUES ($id, $uuid, $created_at, $scenario, $source_ip, $message, $raw_data)
+      INSERT OR REPLACE INTO alerts (id, uuid, created_at, scenario, source_ip, source_cn, source_as_name, source_scope, source_range, target, simulated, message, raw_data)
+      VALUES ($id, $uuid, $created_at, $scenario, $source_ip, $source_cn, $source_as_name, $source_scope, $source_range, $target, $simulated, $message, $raw_data)
     `);
 
     this.getAlertsStatement = this.db.query(`
@@ -147,9 +183,47 @@ export class CrowdsecDatabase {
     this.countAlertsStatement = this.db.query('SELECT COUNT(*) as count FROM alerts');
     this.deleteOldAlertsStatement = this.db.query('DELETE FROM alerts WHERE created_at < $cutoff');
 
+    this.getAlertStatsSinceStatement = this.db.query(`
+      SELECT created_at, scenario, source_ip, source_cn, source_as_name, source_scope, source_range, target, simulated
+      FROM alerts
+      WHERE created_at >= $since
+      ORDER BY created_at DESC
+    `);
+
+    this.getAlertsSincePaginatedStatement = this.db.query(`
+      SELECT raw_data FROM alerts
+      WHERE created_at >= $since
+      ORDER BY created_at DESC
+      LIMIT $limit OFFSET $offset
+    `);
+
+    this.countAlertsSinceStatement = this.db.query(`
+      SELECT COUNT(*) as count FROM alerts
+      WHERE created_at >= $since
+    `);
+
     this.insertDecisionStatement = this.db.query(`
-      INSERT OR REPLACE INTO decisions (id, uuid, alert_id, created_at, stop_at, value, type, origin, scenario, raw_data)
-      VALUES ($id, $uuid, $alert_id, $created_at, $stop_at, $value, $type, $origin, $scenario, $raw_data)
+      INSERT OR REPLACE INTO decisions (id, uuid, alert_id, created_at, stop_at, value, type, origin, scenario, target, simulated, raw_data)
+      VALUES ($id, $uuid, $alert_id, $created_at, $stop_at, $value, $type, $origin, $scenario, $target, $simulated, $raw_data)
+    `);
+
+    this.getDecisionStatsSinceStatement = this.db.query(`
+      SELECT id, created_at, scenario, value, stop_at, target, simulated
+      FROM decisions
+      WHERE created_at >= $since OR stop_at > $now
+      ORDER BY stop_at DESC
+    `);
+
+    this.getActiveDecisionsPaginatedStatement = this.db.query(`
+      SELECT raw_data, created_at FROM decisions
+      WHERE stop_at > $now
+      ORDER BY stop_at DESC
+      LIMIT $limit OFFSET $offset
+    `);
+
+    this.countActiveDecisionsStatement = this.db.query(`
+      SELECT COUNT(*) as count FROM decisions
+      WHERE stop_at > $now
     `);
 
     this.updateDecisionStatement = this.db.query(`
@@ -289,6 +363,30 @@ export class CrowdsecDatabase {
 
   deleteOldAlerts(cutoff: string): number {
     return this.deleteOldAlertsStatement.run({ $cutoff: cutoff }).changes;
+  }
+
+  getAlertStatsSince(since: string): StatsAlertRow[] {
+    return this.getAlertStatsSinceStatement.all({ $since: since }) as StatsAlertRow[];
+  }
+
+  getDecisionStatsSince(since: string, now: string): StatsDecisionRow[] {
+    return this.getDecisionStatsSinceStatement.all({ $since: since, $now: now }) as StatsDecisionRow[];
+  }
+
+  getAlertsSincePaginated(since: string, limit: number, offset: number): RowWithRawData[] {
+    return this.getAlertsSincePaginatedStatement.all({ $since: since, $limit: limit, $offset: offset }) as RowWithRawData[];
+  }
+
+  countAlertsSince(since: string): number {
+    return (this.countAlertsSinceStatement.get({ $since: since }) as CountRow).count;
+  }
+
+  getActiveDecisionsPaginated(now: string, limit: number, offset: number): RowWithRawData[] {
+    return this.getActiveDecisionsPaginatedStatement.all({ $now: now, $limit: limit, $offset: offset }) as RowWithRawData[];
+  }
+
+  countActiveDecisions(now: string): number {
+    return (this.countActiveDecisionsStatement.get({ $now: now }) as CountRow).count;
   }
 
   insertDecision(params: DecisionInsertParams): void {
@@ -712,6 +810,29 @@ function initSchema(db: Database): void {
   migrateNotificationsTable(db, createNotificationsTable);
   db.exec(createNotificationIncidentsTable);
   seedNotificationIncidentsFromHistoryIfEmpty(db);
+  migrateStatsColumns(db);
+}
+
+function migrateStatsColumns(db: Database): void {
+  const alertCols = db.query('PRAGMA table_info(alerts)').all() as Array<{ name: string }>;
+  const alertColNames = new Set(alertCols.map((c) => c.name));
+
+  if (!alertColNames.has('source_cn')) {
+    db.exec('ALTER TABLE alerts ADD COLUMN source_cn TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN source_as_name TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN source_scope TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN source_range TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN target TEXT');
+    db.exec('ALTER TABLE alerts ADD COLUMN simulated INTEGER DEFAULT 0');
+  }
+
+  const decisionCols = db.query('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+  const decisionColNames = new Set(decisionCols.map((c) => c.name));
+
+  if (!decisionColNames.has('target')) {
+    db.exec('ALTER TABLE decisions ADD COLUMN target TEXT');
+    db.exec('ALTER TABLE decisions ADD COLUMN simulated INTEGER DEFAULT 0');
+  }
 }
 
 function migrateNotificationRulesTable(db: Database, createNotificationRulesTable: string): void {
