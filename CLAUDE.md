@@ -104,7 +104,17 @@ The server has several performance layers for handling large datasets (20k+ aler
 
 When modifying data mutation paths (delete alerts/decisions, add decisions, cleanup by IP), always call `invalidateResponseCache()` after the mutation.
 
+6. **Dashboard aggregation endpoint** — `GET /api/stats/dashboard?granularity=day|hour` returns pre-aggregated stats (~12KB) instead of raw records (~37MB). Supports filter params (`country`, `scenario`, `as_name`, `ip`, `target`, `simulated`). Aggregation runs in SQL via `getDashboardStats()` in `database.ts`. Cached in `responseCache.dashboard` (only unfiltered day-granularity requests).
+
+7. **Unscoped LAPI fetch** — `lapi.ts:fetchAlerts()` fetches with `scope=ip`, `scope=range`, AND `undefined` (no scope). The unscoped fetch captures batch alerts from `cscli decisions import` which have empty `source.scope`. Results are merged by alert ID to deduplicate.
+
 When adding columns to alerts/decisions tables, update: the INSERT statement, `AlertInsertParams`/`DecisionInsertParams` interfaces, `processAlertForDatabase()` in `app.ts`, and the `insertAlert`/`insertDecision` calls in test files.
+
+### UI patterns
+
+- **Loading state**: Never hide existing data during a reload. Use `{loading && data.length === 0 ? <Loading /> : data.map(...)}` instead of `{loading ? <Loading /> : data.map(...)}`. This prevents flicker when multiple effects trigger concurrent loads.
+- **Suspense**: Route fallbacks are set to `null` (not a loading component) to prevent flash during lazy chunk loads.
+- **Refresh effect**: Use `isLoadingInitial` ref to prevent background refresh from firing before the mount load completes.
 
 ### Testing
 
