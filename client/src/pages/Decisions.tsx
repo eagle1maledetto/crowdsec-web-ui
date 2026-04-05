@@ -88,6 +88,9 @@ export function Decisions() {
 
     const selectAllDecisionsRef = useRef<HTMLInputElement | null>(null);
     const filterDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isInitialMount = useRef(true);
+    const isLoadingInitial = useRef(true);
+    const loadDecisionsRef = useRef<typeof loadDecisions>(null as any);
     const filterRef = useRef(filter);
     const currentPageRef = useRef(currentPage);
     filterRef.current = filter;
@@ -145,33 +148,37 @@ export function Decisions() {
             if (!isBackground) setLoading(false);
         }
     }, [includeExpiredParam, setLastUpdated, buildServerFilters]);
+    loadDecisionsRef.current = loadDecisions;
 
-    // Sync "q" param to filter state
+    // Load once on mount
     useEffect(() => {
-        const queryParam = searchParams.get("q");
-        if (queryParam) {
-            setFilter(queryParam);
+        loadDecisionsRef.current(false, 1).then(() => { isLoadingInitial.current = false; });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Debounced search: reload from page 1 when filter text changes (skip initial mount)
+    useEffect(() => {
+        if (isInitialMount.current) {
+            isInitialMount.current = false;
+            return;
         }
-    }, [searchParams]);
-
-    useEffect(() => {
-        loadDecisions(false, 1);
-    }, [loadDecisions]);
-
-    // Debounced search: reload from page 1 when filter changes
-    useEffect(() => {
         if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
         filterDebounceRef.current = setTimeout(() => {
             setCurrentPage(1);
-            loadDecisions(false, 1);
+            loadDecisionsRef.current(false, 1);
         }, 300);
         return () => { if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [filter]);
 
+    // Background refresh — skip during initial load
+    const lastRefreshSignal = useRef(refreshSignal);
     useEffect(() => {
-        if (refreshSignal > 0) loadDecisions(true);
-    }, [refreshSignal, loadDecisions]);
+        if (isLoadingInitial.current) return;
+        if (refreshSignal === lastRefreshSignal.current) return;
+        lastRefreshSignal.current = refreshSignal;
+        if (refreshSignal > 0) loadDecisionsRef.current(true);
+    }, [refreshSignal]);
 
     const handleAddDecision = async (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
@@ -570,9 +577,9 @@ export function Decisions() {
                             </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                            {loading ? (
+                            {loading && visibleDecisions.length === 0 ? (
                                 <tr><td colSpan={11} className="px-6 py-4 text-center text-sm text-gray-500">Loading decisions...</td></tr>
-                            ) : visibleDecisions.length === 0 ? (
+                            ) : !loading && visibleDecisions.length === 0 ? (
                                 <tr><td colSpan={11} className="px-6 py-4 text-center text-sm text-gray-500">{alertIdFilter ? "No decisions for this alert" : "No decisions found"}</td></tr>
                             ) : (
                                 visibleDecisions.map((decision, index) => {
