@@ -118,6 +118,9 @@ export function Alerts() {
     const selectedAlertIdRef = useRef<string | number | null>(null);
 
     const filterDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isInitialMount = useRef(true);
+    const isLoadingInitial = useRef(true);
+    const loadAlertsRef = useRef<typeof loadAlerts>(null as any);
     const filterRef = useRef(filter);
     const currentPageRef = useRef(currentPage);
     filterRef.current = filter;
@@ -205,25 +208,37 @@ export function Alerts() {
             if (!isBackground) setLoading(false);
         }
     }, [alertIdParam, queryParam, setLastUpdated, buildServerFilters]);
+    loadAlertsRef.current = loadAlerts;
 
+    // Single mount effect — loads data once, no re-triggers
     useEffect(() => {
-        loadAlerts(false, 1);
-    }, [loadAlerts]);
+        loadAlertsRef.current(false, 1).then(() => { isLoadingInitial.current = false; });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
-    // Debounced search: reload from page 1 when filter changes
+    // Debounced search: reload from page 1 when filter text changes (skip initial mount)
     useEffect(() => {
+        if (isInitialMount.current) {
+            isInitialMount.current = false;
+            return;
+        }
         if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
         filterDebounceRef.current = setTimeout(() => {
             setCurrentPage(1);
-            loadAlerts(false, 1);
+            loadAlertsRef.current(false, 1);
         }, 300);
         return () => { if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [filter]);
 
+    // Background refresh — skip during initial load
+    const lastRefreshSignal = useRef(refreshSignal);
     useEffect(() => {
-        if (refreshSignal > 0) loadAlerts(true);
-    }, [refreshSignal, loadAlerts]);
+        if (isLoadingInitial.current) return;
+        if (refreshSignal === lastRefreshSignal.current) return;
+        lastRefreshSignal.current = refreshSignal;
+        if (refreshSignal > 0) loadAlertsRef.current(true);
+    }, [refreshSignal]);
 
     // Keep ref in sync with selectedAlert for auto-refresh
     useEffect(() => {
@@ -489,9 +504,9 @@ export function Alerts() {
                             </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                            {loading ? (
+                            {loading && visibleAlerts.length === 0 ? (
                                 <tr><td colSpan={9} className="px-6 py-4 text-center text-sm text-gray-500">Loading alerts...</td></tr>
-                            ) : visibleAlerts.length === 0 ? (
+                            ) : !loading && visibleAlerts.length === 0 ? (
                                 <tr><td colSpan={9} className="px-6 py-4 text-center text-sm text-gray-500">No alerts found</td></tr>
                             ) : (
                                 visibleAlerts.map((alert) => {
