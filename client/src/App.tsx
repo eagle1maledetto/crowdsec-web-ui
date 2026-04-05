@@ -29,7 +29,7 @@ function AppContent() {
             <Route
               index
               element={(
-                <Suspense fallback={<RouteFallback />}>
+                <Suspense fallback={null}>
                   <Dashboard />
                 </Suspense>
               )}
@@ -37,7 +37,7 @@ function AppContent() {
             <Route
               path="alerts"
               element={(
-                <Suspense fallback={<RouteFallback />}>
+                <Suspense fallback={null}>
                   <Alerts />
                 </Suspense>
               )}
@@ -45,7 +45,7 @@ function AppContent() {
             <Route
               path="decisions"
               element={(
-                <Suspense fallback={<RouteFallback />}>
+                <Suspense fallback={null}>
                   <Decisions />
                 </Suspense>
               )}
@@ -53,7 +53,7 @@ function AppContent() {
             <Route
               path="notifications"
               element={(
-                <Suspense fallback={<RouteFallback />}>
+                <Suspense fallback={null}>
                   <Notifications />
                 </Suspense>
               )}
