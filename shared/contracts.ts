@@ -138,6 +138,7 @@ export interface DecisionListDetail {
 export interface DecisionListItem {
   id: string | number;
   created_at: string;
+  machine?: string;
   scenario?: string;
   value?: string;
   expired: boolean;
@@ -293,6 +294,7 @@ export interface ConfigResponse {
   lapi_status: LapiStatus;
   sync_status: SyncStatus;
   simulations_enabled: boolean;
+  machine_features_enabled: boolean;
 }
 
 export interface AddDecisionRequest {
