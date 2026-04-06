@@ -118,9 +118,10 @@ When adding columns to alerts/decisions tables, update: the INSERT statement, `A
 
 ### Testing
 
-- Server tests: Vitest in Node environment (`vitest.server.config.ts`)
+- Server tests: Vitest in Node environment (`vitest.server.config.ts`) — 73 tests across 9 files
 - Client tests: Vitest in jsdom (`vitest.client.config.ts`) with Testing Library
 - Client coverage thresholds: 90% lines/functions/branches/statements
+- Run on vishnu: `pnpm test:server` (Node 24 + pnpm 10 installed on host)
 
 ### Build output
 
