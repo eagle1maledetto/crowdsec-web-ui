@@ -1036,6 +1036,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       $source_range: alertSource?.range,
       $target: target,
       $simulated: enrichedAlert.simulated ? 1 : 0,
+      $machine_id: alert.machine_id || undefined,
       $message: alert.message || '',
       $raw_data: JSON.stringify(enrichedAlert),
     };
