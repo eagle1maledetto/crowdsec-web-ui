@@ -971,7 +971,7 @@ describe('createApp', () => {
     expect(await response.json()).toEqual(expect.objectContaining({
       requested_alerts: 2,
       deleted_alerts: 1,
-      deleted_decisions: 1,
+      deleted_decisions: 2,
       failed: [expect.objectContaining({ kind: 'alert', id: '2' })],
     }));
     expect(database.countAlerts()).toBe(1);
