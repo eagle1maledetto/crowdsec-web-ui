@@ -110,10 +110,17 @@ export interface DashboardStatsFilters {
   ip?: string;
   target?: string;
   simulated?: boolean;
+  dateStart?: string;
+  dateEnd?: string;
 }
 
 export interface DashboardStatsResult {
   totals: {
+    alerts: number;
+    decisions: number;
+    simulated_alerts: number;
+  };
+  global_totals: {
     alerts: number;
     decisions: number;
     simulated_alerts: number;
@@ -785,17 +792,65 @@ export class CrowdsecDatabase {
       alertConditions.push('simulated = ?');
       alertParams.push(filters.simulated ? 1 : 0);
     }
+    if (filters?.dateStart) {
+      alertConditions.push('created_at >= ?');
+      alertParams.push(filters.dateStart);
+    }
+    if (filters?.dateEnd) {
+      alertConditions.push('created_at <= ?');
+      alertParams.push(filters.dateEnd);
+    }
 
     const alertWhere = alertConditions.join(' AND ');
 
-    // Total counts
+    // Global totals (only time-bounded by lookback, no user filters)
+    const globalAlertTotals = this.db.prepare(
+      `SELECT COUNT(*) as total, SUM(CASE WHEN simulated = 1 THEN 1 ELSE 0 END) as simulated FROM alerts WHERE created_at >= ?`
+    ).get(since) as { total: number; simulated: number | null };
+
+    const globalDecisionTotal = this.db.prepare(
+      'SELECT COUNT(*) as total FROM decisions WHERE stop_at > ?'
+    ).get(now) as { total: number };
+
+    // Filtered totals
     const alertTotals = this.db.prepare(
       `SELECT COUNT(*) as total, SUM(CASE WHEN simulated = 1 THEN 1 ELSE 0 END) as simulated FROM alerts WHERE ${alertWhere}`
     ).get(...alertParams) as { total: number; simulated: number | null };
 
+    // Build dynamic WHERE clauses for decisions based on applicable filters
+    const decisionConditions: string[] = ['stop_at > ?'];
+    const decisionParams: unknown[] = [now];
+
+    if (filters?.ip) {
+      decisionConditions.push('value LIKE ?');
+      decisionParams.push(`%${filters.ip}%`);
+    }
+    if (filters?.scenario) {
+      decisionConditions.push('scenario LIKE ?');
+      decisionParams.push(`%${filters.scenario}%`);
+    }
+    if (filters?.target) {
+      decisionConditions.push('target LIKE ?');
+      decisionParams.push(`%${filters.target}%`);
+    }
+    if (filters?.simulated !== undefined) {
+      decisionConditions.push('simulated = ?');
+      decisionParams.push(filters.simulated ? 1 : 0);
+    }
+    if (filters?.dateStart) {
+      decisionConditions.push('created_at >= ?');
+      decisionParams.push(filters.dateStart);
+    }
+    if (filters?.dateEnd) {
+      decisionConditions.push('created_at <= ?');
+      decisionParams.push(filters.dateEnd);
+    }
+
+    const decisionWhere = decisionConditions.join(' AND ');
+
     const decisionTotal = this.db.prepare(
-      'SELECT COUNT(*) as total FROM decisions WHERE stop_at > ?'
-    ).get(now) as { total: number };
+      `SELECT COUNT(*) as total FROM decisions WHERE ${decisionWhere}`
+    ).get(...decisionParams) as { total: number };
 
     // Time series - alerts (live only)
     const alertBuckets = this.db.prepare(
@@ -807,15 +862,23 @@ export class CrowdsecDatabase {
       `SELECT ${dateFmt} as date, COUNT(*) as count FROM alerts WHERE ${alertWhere} AND simulated = 1 GROUP BY ${dateFmt} ORDER BY date`
     ).all(...alertParams) as Array<{ date: string; count: number }>;
 
-    // Time series - decisions (live only)
+    // Time series - decisions (live only) - use decision filters
+    const decisionTsConditions = [...decisionConditions, 'simulated = 0'];
+    const decisionTsParams = [...decisionParams, ];
+    const decisionTsWhere = decisionTsConditions.join(' AND ');
+
     const decisionBuckets = this.db.prepare(
-      `SELECT ${dateFmt} as date, COUNT(*) as count FROM decisions WHERE created_at >= ? AND stop_at > ? AND simulated = 0 GROUP BY ${dateFmt} ORDER BY date`
-    ).all(since, now) as Array<{ date: string; count: number }>;
+      `SELECT ${dateFmt} as date, COUNT(*) as count FROM decisions WHERE ${decisionTsWhere} GROUP BY ${dateFmt} ORDER BY date`
+    ).all(...decisionTsParams) as Array<{ date: string; count: number }>;
 
     // Time series - simulated decisions
+    const simDecisionTsConditions = [...decisionConditions, 'simulated = 1'];
+    const simDecisionTsParams = [...decisionParams, ];
+    const simDecisionTsWhere = simDecisionTsConditions.join(' AND ');
+
     const simulatedDecisionBuckets = this.db.prepare(
-      `SELECT ${dateFmt} as date, COUNT(*) as count FROM decisions WHERE created_at >= ? AND stop_at > ? AND simulated = 1 GROUP BY ${dateFmt} ORDER BY date`
-    ).all(since, now) as Array<{ date: string; count: number }>;
+      `SELECT ${dateFmt} as date, COUNT(*) as count FROM decisions WHERE ${simDecisionTsWhere} GROUP BY ${dateFmt} ORDER BY date`
+    ).all(...simDecisionTsParams) as Array<{ date: string; count: number }>;
 
     // Top 10 aggregations
     const topCountries = this.db.prepare(
@@ -847,6 +910,11 @@ export class CrowdsecDatabase {
         alerts: alertTotals.total,
         decisions: decisionTotal.total,
         simulated_alerts: alertTotals.simulated ?? 0,
+      },
+      global_totals: {
+        alerts: globalAlertTotals.total,
+        decisions: globalDecisionTotal.total,
+        simulated_alerts: globalAlertTotals.simulated ?? 0,
       },
       time_series: {
         granularity,
@@ -890,6 +958,14 @@ export class CrowdsecDatabase {
     if (filters?.simulated !== undefined) {
       conditions.push('simulated = ?');
       params.push(filters.simulated ? 1 : 0);
+    }
+    if (filters?.dateStart) {
+      conditions.push('created_at >= ?');
+      params.push(filters.dateStart);
+    }
+    if (filters?.dateEnd) {
+      conditions.push('created_at <= ?');
+      params.push(filters.dateEnd);
     }
 
     const where = conditions.join(' AND ');

@@ -761,8 +761,10 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       const target = context.req.query('target') || undefined;
       const simulatedParam = context.req.query('simulated');
       const simulated = simulatedParam === 'true' ? true : simulatedParam === 'false' ? false : undefined;
+      const dateStart = context.req.query('dateStart') || undefined;
+      const dateEnd = context.req.query('dateEnd') || undefined;
 
-      const hasFilters = country || scenario || asName || ip || target || simulated !== undefined;
+      const hasFilters = country || scenario || asName || ip || target || simulated !== undefined || dateStart || dateEnd;
 
       // Use cache only for unfiltered requests with day granularity
       if (!hasFilters && granularity === 'day' && isResponseCacheValid(responseCache.dashboard)) {
@@ -773,7 +775,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       const now = new Date().toISOString();
 
       const filters: DashboardStatsFilters | undefined = hasFilters
-        ? { country, scenario, as_name: asName, ip, target, simulated }
+        ? { country, scenario, as_name: asName, ip, target, simulated, dateStart, dateEnd }
         : undefined;
 
       const result = database.getDashboardStats(since, now, granularity, filters);

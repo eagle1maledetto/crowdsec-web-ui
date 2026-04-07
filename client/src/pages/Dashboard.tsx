@@ -244,8 +244,13 @@ export function Dashboard() {
         if (filters.target) { f.target = filters.target; hasAny = true; }
         if (filters.simulation === 'live') { f.simulated = false; hasAny = true; }
         if (filters.simulation === 'simulated') { f.simulated = true; hasAny = true; }
+        if (filters.dateRange) {
+            f.dateStart = filters.dateRange.start;
+            f.dateEnd = filters.dateRange.end;
+            hasAny = true;
+        }
         return hasAny ? f : undefined;
-    }, [filters.country, filters.scenario, filters.as, filters.ip, filters.target, filters.simulation]);
+    }, [filters.country, filters.scenario, filters.as, filters.ip, filters.target, filters.simulation, filters.dateRange]);
 
     const loadData = useCallback(async (isBackground = false) => {
         try {
@@ -408,6 +413,14 @@ export function Dashboard() {
     const simulatedAlertsCount = dashboardData?.totals.simulated_alerts ?? 0;
     const liveAlertsCount = totalAlerts - simulatedAlertsCount;
 
+    // Global totals (unfiltered, only lookback-bounded)
+    const globalAlerts = dashboardData?.global_totals?.alerts ?? totalAlerts;
+    const globalDecisions = dashboardData?.global_totals?.decisions ?? totalDecisions;
+    const globalSimulatedAlerts = dashboardData?.global_totals?.simulated_alerts ?? simulatedAlertsCount;
+
+    // Total to use for StatCard percentages based on toggle
+    const statCardTotal = percentageBasis === 'global' ? globalAlerts : totalAlerts;
+
     const simulationsEnabled = config?.simulations_enabled === true;
     const hasActiveFilters = filters.dateRange !== null ||
         filters.country !== null ||
@@ -438,18 +451,28 @@ export function Dashboard() {
                             <div>
                                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Alerts</p>
                                 <div className="flex items-baseline gap-2">
-                                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">{totalAlerts}</h3>
+                                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">{globalAlerts}</h3>
                                 </div>
-                                {showSimulationBreakout && simulatedAlertsCount > 0 && (
+                                {hasActiveFilters && totalAlerts !== globalAlerts && (
+                                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                        Filtered: {totalAlerts}
+                                    </p>
+                                )}
+                                {showSimulationBreakout && globalSimulatedAlerts > 0 && (
                                     <div className="mt-3">
                                         <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                                             Simulation
                                         </p>
                                         <div className="flex items-baseline gap-2">
                                             <span className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                                                {simulatedAlertsCount}
+                                                {globalSimulatedAlerts}
                                             </span>
                                         </div>
+                                        {hasActiveFilters && simulatedAlertsCount !== globalSimulatedAlerts && (
+                                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                                                Filtered: {simulatedAlertsCount}
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -466,8 +489,13 @@ export function Dashboard() {
                             <div>
                                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Active Decisions</p>
                                 <div className="flex items-baseline gap-2">
-                                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">{totalDecisions}</h3>
+                                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">{globalDecisions}</h3>
                                 </div>
+                                {hasActiveFilters && totalDecisions !== globalDecisions && (
+                                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                        Filtered: {totalDecisions}
+                                    </p>
+                                )}
                             </div>
                         </CardContent>
                     </Card>
@@ -625,7 +653,7 @@ export function Dashboard() {
                                 items={statistics.topCountries}
                                 onSelect={(item) => toggleFilter('country', item.countryCode)}
                                 selectedValue={filters.country}
-                                total={totalAlerts}
+                                total={statCardTotal}
                             />
                             <StatCard
                                 title="Top Scenarios"
@@ -635,21 +663,21 @@ export function Dashboard() {
                                 renderLabel={(item) => (
                                     <ScenarioName name={item.label} showLink={true} />
                                 )}
-                                total={totalAlerts}
+                                total={statCardTotal}
                             />
                             <StatCard
                                 title="Top AS"
                                 items={statistics.topAS}
                                 onSelect={(item) => toggleFilter('as', item.label)}
                                 selectedValue={filters.as}
-                                total={totalAlerts}
+                                total={statCardTotal}
                             />
                             <StatCard
                                 title="Top Targets"
                                 items={statistics.topTargets}
                                 onSelect={(item) => toggleFilter('target', item.label)}
                                 selectedValue={filters.target}
-                                total={totalAlerts}
+                                total={statCardTotal}
                             />
                         </div>
                     </>
