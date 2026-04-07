@@ -128,6 +128,29 @@ When adding columns to alerts/decisions tables, update: the INSERT statement, `A
 - `dist/client/` — static SPA assets
 - `dist/server/` — bundled ESM server code
 
+### Deploy on vishnu.parvati.it
+
+**IMPORTANT: Follow this procedure exactly. Do not improvise or skip steps.**
+
+1. Verify override exists: `cat docker-compose.override.yml` — if missing, the deploy WILL break
+2. Run tests: `pnpm test:server`
+3. Build and deploy: `docker compose down && docker compose up -d --build`
+4. Verify: `sleep 25 && docker ps --filter name=crowdsec_web_ui --format '{{.Status}}'` — must show "healthy"
+5. Check logs: `docker logs crowdsec_web_ui 2>&1 | tail -10` — must show sync activity, no "Authentication failed"
+
+The `docker-compose.override.yml` provides vishnu-specific config (network_mode: host, volume path). It is gitignored and can be deleted by git operations. If missing, recreate it:
+
+```yaml
+services:
+  crowdsec-web-ui:
+    network_mode: host
+    ports: !reset []
+    volumes: !override
+      - /opt/crowdsec-web-ui/data:/app/data
+```
+
+**Never merge a PR without the user explicitly confirming they have tested and approved it.**
+
 ### Tooling
 
 - **pnpm 10** (workspace with `pnpm-workspace.yaml` for native dep builds)
