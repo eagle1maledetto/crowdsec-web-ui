@@ -1581,22 +1581,29 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
     for (const id of ids) {
       try {
-        await lapiClient.deleteAlert(id);
-        deletedAlertIds.push(id);
-
+        // Delete decisions from LAPI first so bouncer stream receives "deleted" events
         const alert = alertMap.get(id);
         if (alert) {
           try {
             const parsedAlert = JSON.parse(alert.raw_data) as AlertRecord;
             for (const decision of parsedAlert.decisions || []) {
               if (decision?.id !== undefined && decision?.id !== null) {
-                deletedDecisionIds.add(String(decision.id));
+                const decisionId = String(decision.id);
+                try {
+                  await lapiClient.deleteDecision(decisionId);
+                } catch {
+                  // Decision may already be gone; continue with alert deletion
+                }
+                deletedDecisionIds.add(decisionId);
               }
             }
           } catch {
             // Ignore cache parse issues and still remove the alert row itself.
           }
         }
+
+        await lapiClient.deleteAlert(id);
+        deletedAlertIds.push(id);
       } catch (error) {
         const typedError = error as AnyError;
         if (isPermissionError(typedError)) {
@@ -1667,14 +1674,17 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
     for (const alert of alerts) {
       try {
-        await lapiClient.deleteAlert(alert.id);
-        deletedAlertIds.push(alert.id);
-
+        // Delete decisions from LAPI first so bouncer stream receives "deleted" events
         try {
           const parsedAlert = JSON.parse(alert.raw_data) as AlertRecord;
           for (const decision of parsedAlert.decisions || []) {
             if (decision?.id !== undefined && decision?.id !== null) {
               const decisionId = String(decision.id);
+              try {
+                await lapiClient.deleteDecision(decisionId);
+              } catch {
+                // Decision may already be gone; continue
+              }
               alertDecisionIds.add(decisionId);
               deletedDecisionIds.add(decisionId);
             }
@@ -1682,6 +1692,9 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         } catch {
           // Keep going even if cache payload is malformed.
         }
+
+        await lapiClient.deleteAlert(alert.id);
+        deletedAlertIds.push(alert.id);
       } catch (error) {
         const typedError = error as AnyError;
         if (isPermissionError(typedError)) {
