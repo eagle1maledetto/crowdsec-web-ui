@@ -343,6 +343,11 @@ export interface DashboardStatsResponse {
     decisions: number;
     simulated_alerts: number;
   };
+  global_totals: {
+    alerts: number;
+    decisions: number;
+    simulated_alerts: number;
+  };
   time_series: {
     granularity: 'hour' | 'day';
     alert_buckets: Array<{ date: string; count: number }>;

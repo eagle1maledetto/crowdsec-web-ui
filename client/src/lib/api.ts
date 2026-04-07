@@ -123,6 +123,8 @@ export interface DashboardStatsFilters {
     ip?: string;
     target?: string;
     simulated?: boolean;
+    dateStart?: string;
+    dateEnd?: string;
 }
 
 export async function fetchDashboardStats(
@@ -137,6 +139,8 @@ export async function fetchDashboardStats(
         if (filters.ip) params.set('ip', filters.ip);
         if (filters.target) params.set('target', filters.target);
         if (filters.simulated !== undefined) params.set('simulated', String(filters.simulated));
+        if (filters.dateStart) params.set('dateStart', filters.dateStart);
+        if (filters.dateEnd) params.set('dateEnd', filters.dateEnd);
     }
     return fetchJson<DashboardStatsResponse>(`/api/stats/dashboard?${params.toString()}`, undefined, 'Failed to fetch dashboard stats');
 }
